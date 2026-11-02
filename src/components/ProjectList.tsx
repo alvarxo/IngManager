@@ -41,42 +41,63 @@ export function ProjectList() {
         )}
         {!isLoading && projects.length === 0 && (
           <div className="p-4 text-[12.5px] text-muted">
-            No hay proyectos. Cree el primero con el botón Nuevo.
+            No hay proyectos. Cree uno nuevo o importe una carpeta existente
+            desde Ajustes.
           </div>
         )}
         <ul>
-          {projects.map((p) => (
-            <li key={p.id}>
-              <button
-                type="button"
-                onClick={async () => {
-                  await api.openProject(p.id);
-                  setView({ kind: "project", projectId: p.id });
-                }}
-                className={cn(
-                  "flex h-[42px] w-full items-center gap-2 border-b border-border/60 px-3 text-left",
-                  selectedId === p.id
-                    ? "bg-selection"
-                    : "hover:bg-elevated",
-                )}
-              >
-                <span className="w-[46px] font-mono text-[12px] font-semibold text-accent">
-                  {p.code}
-                </span>
-                <span className="min-w-0 flex-1 truncate text-[12.5px]">
-                  {p.name}
-                </span>
-                {p.is_favorite === 1 && (
-                  <Star size={12} className="shrink-0 text-warn" fill="currentColor" />
-                )}
-                {p.status !== "active" && (
-                  <span className="shrink-0 text-[10px] uppercase text-muted">
-                    {p.status}
+          {projects.map((p) => {
+            const codeLabel = p.code?.trim() || "—";
+            const pathHint = p.root_relative_path;
+            return (
+              <li key={p.id}>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    await api.openProject(p.id);
+                    setView({ kind: "project", projectId: p.id });
+                  }}
+                  className={cn(
+                    "flex min-h-[42px] w-full items-center gap-2 border-b border-border/60 px-3 py-1 text-left",
+                    selectedId === p.id
+                      ? "bg-selection"
+                      : "hover:bg-elevated",
+                  )}
+                  title={pathHint}
+                >
+                  <span className="w-[52px] shrink-0 font-mono text-[12px] font-semibold text-accent">
+                    {codeLabel}
                   </span>
-                )}
-              </button>
-            </li>
-          ))}
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[12.5px]">{p.name}</span>
+                    <span className="block truncate font-mono text-[10.5px] text-muted">
+                      {pathHint}
+                      {p.import_mode === "linked"
+                        ? " · vinculado"
+                        : p.import_mode === "copied"
+                          ? " · copiado"
+                          : ""}
+                      {p.layout_mode === "pending_reorganize"
+                        ? " · reorg. pendiente"
+                        : ""}
+                    </span>
+                  </span>
+                  {p.is_favorite === 1 && (
+                    <Star
+                      size={12}
+                      className="shrink-0 text-warn"
+                      fill="currentColor"
+                    />
+                  )}
+                  {p.status !== "active" && (
+                    <span className="shrink-0 text-[10px] uppercase text-muted">
+                      {p.status}
+                    </span>
+                  )}
+                </button>
+              </li>
+            );
+          })}
         </ul>
       </div>
 

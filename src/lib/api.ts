@@ -20,6 +20,7 @@ import type {
   PreviewSentResult,
   Project,
   AuditEntry,
+  AuthorizedRoot,
   BackupResult,
   CreateRelationshipInput,
   DetectedFolder,
@@ -42,6 +43,20 @@ export const api = {
   getAppStatus: () => invoke<AppStatus>("get_app_status"),
   setRootPath: (path: string) => invoke<AppStatus>("set_root_path", { path }),
   getRootPath: () => invoke<string | null>("get_root_path"),
+  listAuthorizedRoots: () =>
+    invoke<AuthorizedRoot[]>("list_authorized_roots"),
+  addAuthorizedRoot: (
+    path: string,
+    label?: string | null,
+    makePrimary?: boolean | null,
+  ) =>
+    invoke<AuthorizedRoot>("add_authorized_root", {
+      path,
+      label: label ?? null,
+      makePrimary: makePrimary ?? null,
+    }),
+  removeAuthorizedRoot: (rootId: string) =>
+    invoke<void>("remove_authorized_root", { rootId }),
 
   previewNextProjectCode: () => invoke<string>("preview_next_project_code"),
   listProjects: (includeArchived = false) =>
@@ -53,6 +68,8 @@ export const api = {
     invoke<Project>("update_project", { input }),
   archiveProject: (id: string) => invoke<Project>("archive_project", { id }),
   openProject: (id: string) => invoke<Project>("open_project", { id }),
+  getProjectAbsolutePath: (projectId: string) =>
+    invoke<string>("get_project_absolute_path", { projectId }),
   listProjectCategories: (projectId: string) =>
     invoke<CategorySummary[]>("list_project_categories", { projectId }),
   listRecentProjects: (limit = 8) =>
@@ -248,12 +265,26 @@ export const api = {
 
   detectImportableProjects: (sourcePath: string) =>
     invoke<DetectedFolder[]>("detect_importable_projects", { sourcePath }),
-  previewImportProject: (sourcePath: string, code: string) =>
-    invoke<ImportPreview>("preview_import_project", { sourcePath, code }),
+  previewImportProject: (
+    sourcePath: string,
+    code?: string | null,
+    mode?: string | null,
+    folderName?: string | null,
+    authorizedRootId?: string | null,
+  ) =>
+    invoke<ImportPreview>("preview_import_project", {
+      sourcePath,
+      code: code ?? null,
+      mode: mode ?? null,
+      folderName: folderName ?? null,
+      authorizedRootId: authorizedRootId ?? null,
+    }),
   importExistingProject: (input: ImportProjectInput) =>
     invoke<ImportProjectResult>("import_existing_project", { input }),
   proposeImportCode: (preferred?: string | null) =>
-    invoke<string>("propose_import_code", { preferred: preferred ?? null }),
+    invoke<string | null>("propose_import_code", {
+      preferred: preferred ?? null,
+    }),
 
   listTransmissions: (projectId: string, direction?: string | null) =>
     invoke<TransmissionRow[]>("list_transmissions", {

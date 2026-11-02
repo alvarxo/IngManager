@@ -1,25 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use tauri::State;
 
-use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::models::IndexedFile;
-use crate::path_security::{ensure_under_root, join_under_root};
+use crate::project_paths::{self, ensure_under_any_root};
 use crate::state::AppState;
-
-async fn require_root(state: &AppState) -> AppResult<PathBuf> {
-    let root = db::get_setting(&state.pool, "root_path")
-        .await?
-        .ok_or_else(|| AppError::msg("Configure la carpeta raíz antes de continuar"))?;
-    let path = PathBuf::from(&root);
-    if !path.is_dir() {
-        return Err(AppError::msg(
-            "La carpeta raíz configurada no es accesible",
-        ));
-    }
-    Ok(path)
-}
 
 #[tauri::command]
 pub async fn list_category_files(
@@ -41,8 +27,8 @@ pub async fn list_category_files(
 
 #[tauri::command]
 pub async fn open_file(state: State<'_, AppState>, absolute_path: String) -> AppResult<()> {
-    let root = require_root(&state).await?;
-    let path = ensure_under_root(&root, Path::new(&absolute_path))?;
+    let roots = project_paths::load_root_paths(&state.pool).await?;
+    let (_root, path) = ensure_under_any_root(&roots, Path::new(&absolute_path))?;
     if !path.is_file() {
         return Err(AppError::msg("El archivo no existe o no es un archivo"));
     }
@@ -55,8 +41,8 @@ pub async fn reveal_in_explorer(
     state: State<'_, AppState>,
     absolute_path: String,
 ) -> AppResult<()> {
-    let root = require_root(&state).await?;
-    let path = ensure_under_root(&root, Path::new(&absolute_path))?;
+    let roots = project_paths::load_root_paths(&state.pool).await?;
+    let (_root, path) = ensure_under_any_root(&roots, Path::new(&absolute_path))?;
     if !path.exists() {
         return Err(AppError::msg("La ruta no existe"));
     }
@@ -100,19 +86,11 @@ pub async fn open_project_folder(
     state: State<'_, AppState>,
     project_id: String,
 ) -> AppResult<()> {
-    let root = require_root(&state).await?;
-    let project: (String,) =
-        sqlx::query_as("SELECT root_relative_path FROM projects WHERE id = ?")
-            .bind(project_id)
-            .fetch_optional(&state.pool)
-            .await?
-            .ok_or_else(|| AppError::msg("Proyecto no encontrado"))?;
-
-    let path = join_under_root(&root, &project.0)?;
-    if !path.is_dir() {
+    let loc = project_paths::resolve_project_location(&state.pool, &project_id).await?;
+    if !loc.absolute_path.is_dir() {
         return Err(AppError::msg("La carpeta del proyecto no existe"));
     }
-    open::that(&path).map_err(|e| AppError::msg(format!("No se pudo abrir la carpeta: {e}")))?;
+    open::that(&loc.absolute_path)
+        .map_err(|e| AppError::msg(format!("No se pudo abrir la carpeta: {e}")))?;
     Ok(())
 }
-

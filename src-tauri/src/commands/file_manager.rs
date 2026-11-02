@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 use uuid::Uuid;
 
-use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::fs_util::{
     copy_recursively, engineering_warning_message, ensure_not_into_self, is_engineering_model,
@@ -73,16 +72,13 @@ pub enum ConflictPolicy {
 }
 
 async fn require_root(state: &AppState) -> AppResult<PathBuf> {
-    let root = db::get_setting(&state.pool, "root_path")
-        .await?
-        .ok_or_else(|| AppError::msg("Configure la carpeta raíz antes de continuar"))?;
-    let path = PathBuf::from(&root);
-    if !path.is_dir() {
-        return Err(AppError::msg(
-            "La carpeta raíz configurada no es accesible",
-        ));
-    }
-    Ok(path)
+    crate::project_paths::require_primary_root_path(&state.pool).await
+}
+
+async fn resolve_abs_under_roots(state: &AppState, absolute_path: &str) -> AppResult<(PathBuf, PathBuf)> {
+    let roots = crate::project_paths::load_root_paths(&state.pool).await?;
+    let (root, path) = crate::project_paths::ensure_under_any_root(&roots, Path::new(absolute_path))?;
+    Ok((root.to_path_buf(), path))
 }
 
 fn to_rfc3339(time: SystemTime) -> Option<String> {
@@ -158,8 +154,8 @@ pub async fn list_directory(
     state: State<'_, AppState>,
     absolute_path: String,
 ) -> AppResult<Vec<FsEntry>> {
-    let root = require_root(&state).await?;
-    let dir = ensure_under_root(&root, Path::new(&absolute_path))?;
+    let (root, dir) = resolve_abs_under_roots(&state, &absolute_path).await?;
+    let dir = dir;
     if !dir.is_dir() {
         return Err(AppError::msg("La ruta no es una carpeta"));
     }
@@ -191,13 +187,8 @@ pub async fn resolve_project_category_path(
     category_key: String,
     relative_subpath: Option<String>,
 ) -> AppResult<FsEntry> {
-    let root = require_root(&state).await?;
-    let project: (String,) =
-        sqlx::query_as("SELECT root_relative_path FROM projects WHERE id = ?")
-            .bind(&project_id)
-            .fetch_optional(&state.pool)
-            .await?
-            .ok_or_else(|| AppError::msg("Proyecto no encontrado"))?;
+    let loc = crate::project_paths::resolve_project_location(&state.pool, &project_id).await?;
+    let root = loc.root_path.clone();
 
     let cat: (String,) = sqlx::query_as(
         "SELECT relative_path FROM categories WHERE project_id = ? AND key = ?",
@@ -208,7 +199,7 @@ pub async fn resolve_project_category_path(
     .await?
     .ok_or_else(|| AppError::msg("Categoría no encontrada"))?;
 
-    let mut rel = format!("{}/{}", project.0, cat.0);
+    let mut rel = format!("{}/{}", loc.root_relative_path, cat.0);
     if let Some(sub) = relative_subpath {
         let sub = sub.trim_matches('/').replace('\\', "/");
         if !sub.is_empty() {
@@ -237,8 +228,7 @@ pub async fn create_folder(
     name: String,
 ) -> AppResult<FileOpResult> {
     validate_entry_name(&name)?;
-    let root = require_root(&state).await?;
-    let parent = ensure_under_root(&root, Path::new(&parent_path))?;
+    let (root, parent) = resolve_abs_under_roots(&state, &parent_path).await?;
     if !parent.is_dir() {
         return Err(AppError::msg("La carpeta padre no existe"));
     }
@@ -276,8 +266,7 @@ pub async fn rename_entry(
     acknowledge_engineering: Option<bool>,
 ) -> AppResult<FileOpResult> {
     validate_entry_name(&new_name)?;
-    let root = require_root(&state).await?;
-    let source = ensure_under_root(&root, Path::new(&absolute_path))?;
+    let (root, source) = resolve_abs_under_roots(&state, &absolute_path).await?;
     if !source.exists() {
         return Err(AppError::msg("El elemento no existe"));
     }
@@ -342,8 +331,7 @@ pub async fn copy_entries(
     conflict_policy: Option<ConflictPolicy>,
 ) -> AppResult<FileOpResult> {
     let policy = conflict_policy.unwrap_or(ConflictPolicy::Rename);
-    let root = require_root(&state).await?;
-    let dest = ensure_under_root(&root, Path::new(&dest_dir))?;
+    let (root, dest) = resolve_abs_under_roots(&state, &dest_dir).await?;
     if !dest.is_dir() {
         return Err(AppError::msg("El destino no es una carpeta"));
     }
@@ -407,8 +395,7 @@ pub async fn move_entries(
     acknowledge_engineering: Option<bool>,
 ) -> AppResult<FileOpResult> {
     let policy = conflict_policy.unwrap_or(ConflictPolicy::Rename);
-    let root = require_root(&state).await?;
-    let dest = ensure_under_root(&root, Path::new(&dest_dir))?;
+    let (root, dest) = resolve_abs_under_roots(&state, &dest_dir).await?;
     if !dest.is_dir() {
         return Err(AppError::msg("El destino no es una carpeta"));
     }
@@ -491,8 +478,7 @@ pub async fn import_files(
     conflict_policy: Option<ConflictPolicy>,
 ) -> AppResult<FileOpResult> {
     let policy = conflict_policy.unwrap_or(ConflictPolicy::Rename);
-    let root = require_root(&state).await?;
-    let dest = ensure_under_root(&root, Path::new(&dest_dir))?;
+    let (root, dest) = resolve_abs_under_roots(&state, &dest_dir).await?;
     if !dest.is_dir() {
         return Err(AppError::msg("El destino no es una carpeta"));
     }
@@ -554,10 +540,11 @@ pub async fn delete_to_trash(
     paths: Vec<String>,
     acknowledge_engineering: Option<bool>,
 ) -> AppResult<FileOpResult> {
-    let root = require_root(&state).await?;
+    let mut root = require_root(&state).await?;
     let mut src_paths = Vec::new();
     for p in &paths {
-        let src = ensure_under_root(&root, Path::new(p))?;
+        let (r, src) = resolve_abs_under_roots(&state, p).await?;
+        root = r;
         if !src.exists() {
             return Err(AppError::msg(format!("No existe: {p}")));
         }
@@ -806,8 +793,7 @@ pub async fn get_entry_properties(
     state: State<'_, AppState>,
     absolute_path: String,
 ) -> AppResult<EntryProperties> {
-    let root = require_root(&state).await?;
-    let path = ensure_under_root(&root, Path::new(&absolute_path))?;
+    let (root, path) = resolve_abs_under_roots(&state, &absolute_path).await?;
     if !path.exists() {
         return Err(AppError::msg("El elemento no existe"));
     }
@@ -841,8 +827,7 @@ pub async fn get_entry_properties(
 
 #[tauri::command]
 pub async fn open_path(state: State<'_, AppState>, absolute_path: String) -> AppResult<()> {
-    let root = require_root(&state).await?;
-    let path = ensure_under_root(&root, Path::new(&absolute_path))?;
+    let (_root, path) = resolve_abs_under_roots(&state, &absolute_path).await?;
     if !path.exists() {
         return Err(AppError::msg("La ruta no existe"));
     }

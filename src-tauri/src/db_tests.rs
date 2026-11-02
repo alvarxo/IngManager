@@ -29,12 +29,21 @@ mod tests {
             "categories",
             "indexed_files",
             "transmissions",
+            "document_subcategories",
+            "revisions",
         ] {
             let _: (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM {table}"))
                 .fetch_one(&pool)
                 .await
                 .unwrap_or_else(|_| panic!("missing table {table}"));
         }
+
+        // Phase 3 columns present (empty table → None row is fine)
+        let _: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT subcategory FROM documents LIMIT 1")
+                .fetch_optional(&pool)
+                .await
+                .expect("documents.subcategory");
 
         assert_eq!(next_project_code(26, &[]).unwrap(), "2601");
     }

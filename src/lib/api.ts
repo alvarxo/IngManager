@@ -1,15 +1,26 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AppStatus,
+  AttachFileInput,
   CategorySummary,
   ConflictPolicy,
+  CreateDocumentInput,
   CreateProjectInput,
+  CreateRevisionInput,
+  CreateVersionInput,
+  DocumentFileRow,
+  DocumentRow,
+  DocumentVersionRow,
   EntryProperties,
   FileOpResult,
   FsEntry,
   IndexedFile,
   Project,
+  RelationshipRow,
+  RevisionRow,
+  SubcategoryRow,
   TrashItem,
+  UpdateDocumentInput,
   UpdateProjectInput,
 } from "./types";
 
@@ -120,4 +131,66 @@ export const api = {
     invoke<EntryProperties>("get_entry_properties", { absolutePath }),
   openPath: (absolutePath: string) =>
     invoke<void>("open_path", { absolutePath }),
+
+  listDocuments: (
+    projectId: string,
+    categoryKey?: string | null,
+    currentOnly = true,
+  ) =>
+    invoke<DocumentRow[]>("list_documents", {
+      projectId,
+      categoryKey: categoryKey ?? null,
+      currentOnly,
+    }),
+  getDocument: (id: string) => invoke<DocumentRow>("get_document", { id }),
+  previewNextDocumentCode: (projectId: string, categoryKey: string) =>
+    invoke<string | null>("preview_next_document_code", {
+      projectId,
+      categoryKey,
+    }),
+  createDocument: (input: CreateDocumentInput) =>
+    invoke<DocumentRow>("create_document", { input }),
+  updateDocument: (input: UpdateDocumentInput) =>
+    invoke<DocumentRow>("update_document", { input }),
+  attachFileToVersion: (input: AttachFileInput) =>
+    invoke<DocumentFileRow>("attach_file_to_version", { input }),
+  listDocumentVersions: (documentId: string) =>
+    invoke<DocumentVersionRow[]>("list_document_versions", { documentId }),
+  listVersionFiles: (versionId: string) =>
+    invoke<DocumentFileRow[]>("list_version_files", { versionId }),
+  createDocumentVersion: (input: CreateVersionInput) =>
+    invoke<DocumentVersionRow>("create_document_version", { input }),
+  restoreDocumentVersion: (
+    documentId: string,
+    versionId: string,
+    notes?: string | null,
+  ) =>
+    invoke<DocumentVersionRow>("restore_document_version", {
+      documentId,
+      versionId,
+      notes: notes ?? null,
+    }),
+  openDocumentFile: (fileId: string, useTempCopy?: boolean | null) =>
+    invoke<string>("open_document_file", {
+      fileId,
+      useTempCopy: useTempCopy ?? null,
+    }),
+  listRevisions: (documentId: string) =>
+    invoke<RevisionRow[]>("list_revisions", { documentId }),
+  createRevision: (input: CreateRevisionInput) =>
+    invoke<RevisionRow>("create_revision", { input }),
+  listSubcategories: (projectId: string, categoryKey: string) =>
+    invoke<SubcategoryRow[]>("list_subcategories", { projectId, categoryKey }),
+  createSubcategory: (
+    projectId: string,
+    categoryKey: string,
+    name: string,
+  ) =>
+    invoke<SubcategoryRow>("create_subcategory", {
+      projectId,
+      categoryKey,
+      name,
+    }),
+  listDocumentRelationships: (documentId: string) =>
+    invoke<RelationshipRow[]>("list_document_relationships", { documentId }),
 };

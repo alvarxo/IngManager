@@ -1,3 +1,4 @@
+pub mod documents;
 pub mod file_manager;
 pub mod files;
 pub mod indexing;

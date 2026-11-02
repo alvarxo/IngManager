@@ -3,6 +3,7 @@ mod commands;
 mod db;
 #[cfg(test)]
 mod db_tests;
+mod doc_codes;
 mod error;
 #[cfg(test)]
 mod fs_ops_tests;
@@ -49,6 +50,22 @@ pub fn run() {
             commands::files::open_project_folder,
             commands::indexing::start_initial_index,
             commands::indexing::reindex_root,
+            commands::documents::list_documents,
+            commands::documents::get_document,
+            commands::documents::preview_next_document_code,
+            commands::documents::create_document,
+            commands::documents::update_document,
+            commands::documents::attach_file_to_version,
+            commands::documents::list_document_versions,
+            commands::documents::list_version_files,
+            commands::documents::create_document_version,
+            commands::documents::restore_document_version,
+            commands::documents::open_document_file,
+            commands::documents::list_revisions,
+            commands::documents::create_revision,
+            commands::documents::list_subcategories,
+            commands::documents::create_subcategory,
+            commands::documents::list_document_relationships,
             commands::file_manager::list_directory,
             commands::file_manager::resolve_project_category_path,
             commands::file_manager::create_folder,

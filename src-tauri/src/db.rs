@@ -45,25 +45,48 @@ async fn run_migrations(pool: &SqlitePool) -> AppResult<()> {
     .execute(pool)
     .await?;
 
+    apply_migration(pool, 1, "001_initial", include_str!("../migrations/001_initial.sql")).await?;
+    apply_migration(
+        pool,
+        2,
+        "002_documents_phase3",
+        include_str!("../migrations/002_documents_phase3.sql"),
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn apply_migration(
+    pool: &SqlitePool,
+    version: i64,
+    name: &str,
+    sql: &str,
+) -> AppResult<()> {
     let applied: Option<(i64,)> =
-        sqlx::query_as("SELECT version FROM __migrations WHERE version = 1")
+        sqlx::query_as("SELECT version FROM __migrations WHERE version = ?")
+            .bind(version)
             .fetch_optional(pool)
             .await?;
 
-    if applied.is_none() {
-        let sql = include_str!("../migrations/001_initial.sql");
-        let mut tx = pool.begin().await?;
-        for statement in split_statements(sql) {
-            sqlx::query(statement).execute(&mut *tx).await.map_err(|e| {
-                AppError::msg(format!("Migration failed on statement: {e}\nSQL: {statement}"))
-            })?;
-        }
-        sqlx::query("INSERT INTO __migrations (version, name) VALUES (1, '001_initial')")
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
+    if applied.is_some() {
+        return Ok(());
     }
 
+    let mut tx = pool.begin().await?;
+    for statement in split_statements(sql) {
+        sqlx::query(statement).execute(&mut *tx).await.map_err(|e| {
+            AppError::msg(format!(
+                "Migration {name} failed on statement: {e}\nSQL: {statement}"
+            ))
+        })?;
+    }
+    sqlx::query("INSERT INTO __migrations (version, name) VALUES (?, ?)")
+        .bind(version)
+        .bind(name)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(())
 }
 

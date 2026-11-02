@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui-store";
 import { Button } from "./ui/button";
 import { FileManager } from "./FileManager";
+import { DocumentBrowser } from "./DocumentBrowser";
 
 interface Props {
   projectId: string;
@@ -13,6 +14,9 @@ interface Props {
 
 export function ProjectWorkspace({ projectId, categoryKey }: Props) {
   const setView = useUiStore((s) => s.setView);
+  const projectContentMode = useUiStore((s) => s.projectContentMode);
+  const setProjectContentMode = useUiStore((s) => s.setProjectContentMode);
+  const setSelectedDocumentId = useUiStore((s) => s.setSelectedDocumentId);
 
   const project = useQuery({
     queryKey: ["project", projectId],
@@ -86,6 +90,25 @@ export function ProjectWorkspace({ projectId, categoryKey }: Props) {
             {tab}
           </button>
         ))}
+        <div className="ml-auto flex items-center gap-1 px-2">
+          <Button
+            size="sm"
+            variant={projectContentMode === "documents" ? "default" : "ghost"}
+            onClick={() => setProjectContentMode("documents")}
+          >
+            Lógicos
+          </Button>
+          <Button
+            size="sm"
+            variant={projectContentMode === "files" ? "default" : "ghost"}
+            onClick={() => {
+              setProjectContentMode("files");
+              setSelectedDocumentId(null);
+            }}
+          >
+            Archivos
+          </Button>
+        </div>
       </div>
 
       <div className="flex min-h-0 flex-1">
@@ -98,13 +121,14 @@ export function ProjectWorkspace({ projectId, categoryKey }: Props) {
               <li key={c.key}>
                 <button
                   type="button"
-                  onClick={() =>
+                  onClick={() => {
+                    setSelectedDocumentId(null);
                     setView({
                       kind: "project",
                       projectId,
                       categoryKey: c.key,
-                    })
-                  }
+                    });
+                  }}
                   className={cn(
                     "flex h-[38px] w-full items-center justify-between px-3 text-left text-[12.5px]",
                     activeKey === c.key
@@ -123,7 +147,11 @@ export function ProjectWorkspace({ projectId, categoryKey }: Props) {
         </div>
 
         {activeKey ? (
-          <FileManager projectId={projectId} categoryKey={activeKey} />
+          projectContentMode === "documents" ? (
+            <DocumentBrowser projectId={projectId} categoryKey={activeKey} />
+          ) : (
+            <FileManager projectId={projectId} categoryKey={activeKey} />
+          )
         ) : (
           <div className="p-4 text-muted">Sin categorías</div>
         )}

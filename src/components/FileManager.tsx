@@ -30,6 +30,7 @@ import type { FsEntry } from "@/lib/types";
 import { cn, formatBytes } from "@/lib/utils";
 import {
   filterAndSortEntries,
+  filterEngineeringAuxiliaries,
   parentSubpath,
   type SortDir,
   type SortKey,
@@ -69,6 +70,7 @@ export function FileManager({ projectId, categoryKey }: Props) {
   );
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [showAuxiliaries, setShowAuxiliaries] = useState(false);
   const tableRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -93,11 +95,21 @@ export function FileManager({ projectId, categoryKey }: Props) {
     enabled: !!currentPath,
   });
 
-  const entries = useMemo(
-    () =>
-      filterAndSortEntries(entriesQuery.data ?? [], filter, sortKey, sortDir),
-    [entriesQuery.data, filter, sortKey, sortDir],
-  );
+  const entries = useMemo(() => {
+    const raw = entriesQuery.data ?? [];
+    const filtered =
+      categoryKey === "modelos"
+        ? filterEngineeringAuxiliaries(raw, showAuxiliaries)
+        : raw;
+    return filterAndSortEntries(filtered, filter, sortKey, sortDir);
+  }, [
+    entriesQuery.data,
+    filter,
+    sortKey,
+    sortDir,
+    categoryKey,
+    showAuxiliaries,
+  ]);
 
   const refresh = useCallback(async () => {
     await qc.invalidateQueries({ queryKey: ["fm-folder", projectId, categoryKey] });
@@ -415,6 +427,16 @@ export function FileManager({ projectId, categoryKey }: Props) {
             onChange={(e) => setFilter(e.target.value)}
           />
         </div>
+        {categoryKey === "modelos" && (
+          <label className="ml-1 flex items-center gap-1.5 text-[11.5px] text-muted">
+            <input
+              type="checkbox"
+              checked={showAuxiliaries}
+              onChange={(e) => setShowAuxiliaries(e.target.checked)}
+            />
+            Mostrar auxiliares
+          </label>
+        )}
         <Button variant="secondary" size="sm" onClick={createFolder}>
           <FolderPlus size={14} /> Carpeta
         </Button>

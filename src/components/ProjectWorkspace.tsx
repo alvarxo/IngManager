@@ -260,8 +260,21 @@ export function ProjectWorkspace({ projectId, categoryKey }: Props) {
                     )}
                   >
                     <span>{c.name}</span>
-                    <span className="text-[11px] tabular-nums text-muted">
-                      {c.file_count}
+                    <span
+                      className="text-[11px] tabular-nums text-muted"
+                      title={
+                        c.key === "modelos"
+                          ? `${c.model_count} modelos · ${c.file_count} archivos · ${c.document_count} lógicos`
+                          : `${c.file_count} archivos · ${c.document_count} lógicos`
+                      }
+                    >
+                      {c.key === "modelos"
+                        ? projectContentMode === "documents"
+                          ? c.document_count
+                          : c.model_count || c.file_count
+                        : projectContentMode === "documents"
+                          ? c.document_count
+                          : c.file_count}
                     </span>
                   </button>
                 </li>

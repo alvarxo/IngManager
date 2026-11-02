@@ -55,6 +55,8 @@ export interface CategorySummary {
   relative_path: string;
   sort_order: number;
   file_count: number;
+  model_count: number;
+  document_count: number;
 }
 
 export interface IndexedFile {
@@ -565,4 +567,38 @@ export interface FolderMappingRow {
   category_key: string;
   physical_relative_path: string;
   mapping_mode: string;
+}
+
+export interface EngineeringGroupDto {
+  group_key: string;
+  title: string;
+  principal_file_name: string | null;
+  principal_absolute_path: string | null;
+  auxiliary_count: number;
+  auxiliary_names: string[];
+  standalone_names: string[];
+  already_registered: boolean;
+  document_id: string | null;
+}
+
+export interface BulkRegisterInput {
+  project_id: string;
+  category_key: string;
+  group_keys?: string[] | null;
+  assign_codes?: boolean | null;
+}
+
+export interface BulkRegisterResult {
+  created: number;
+  skipped: number;
+  document_ids: string[];
+}
+
+export interface UpdatePlanItemInput {
+  item_id: string;
+  action?: string | null;
+  category_key?: string | null;
+  target_relative_path?: string | null;
+  status?: string | null;
+  detail?: string | null;
 }

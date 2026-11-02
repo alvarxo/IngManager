@@ -1,14 +1,27 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { FolderTree, Play, ScanSearch } from "lucide-react";
+import { Check, FolderTree, Play, ScanSearch, SkipForward } from "lucide-react";
 import { api } from "@/lib/api";
-import type { OrganizerPlanResult, OrganizerScanItem } from "@/lib/types";
+import type { OrganizerPlanResult, OrganizerScanItem, Project } from "@/lib/types";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
+
+type Stage = 1 | 2 | 3 | 4 | 5;
+
+const STAGE_LABELS: Record<Stage, string> = {
+  1: "Proyecto",
+  2: "Escanear",
+  3: "Clasificar",
+  4: "Editar plan",
+  5: "Aplicar",
+};
 
 export function OrganizerView() {
   const qc = useQueryClient();
+  const [stage, setStage] = useState<Stage>(1);
   const [scope, setScope] = useState<string>("");
   const [mode, setMode] = useState<"virtual" | "physical">("virtual");
+  const [selectedProjectId, setSelectedProjectId] = useState<string>("");
   const [scan, setScan] = useState<OrganizerScanItem[] | null>(null);
   const [plan, setPlan] = useState<OrganizerPlanResult | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -18,6 +31,11 @@ export function OrganizerView() {
     queryFn: () => api.getAppStatus(),
   });
 
+  const projects = useQuery({
+    queryKey: ["projects", false],
+    queryFn: () => api.listProjects(false),
+  });
+
   const roots = status.data?.authorized_roots ?? [];
   const defaultScope =
     scope ||
@@ -25,22 +43,49 @@ export function OrganizerView() {
     roots[0]?.absolute_path ||
     "";
 
+  const projectList = projects.data ?? [];
+  const selectedProject: Project | undefined = projectList.find(
+    (p) => p.id === selectedProjectId,
+  );
+
+  // Default single project: first active when list loads
+  useEffect(() => {
+    if (!selectedProjectId && projectList.length > 0) {
+      setSelectedProjectId(projectList[0].id);
+    }
+  }, [projectList, selectedProjectId]);
+
+  const scopeForProject = useMemo(() => {
+    if (!selectedProject) return defaultScope;
+    const root = roots.find((r) => r.id === selectedProject.authorized_root_id);
+    if (!root) return defaultScope;
+    const base = root.absolute_path.replace(/[\\/]+$/, "");
+    const rel = selectedProject.root_relative_path.replace(/^[\\/]+/, "");
+    return `${base}/${rel}`.replace(/\\/g, "/");
+  }, [selectedProject, roots, defaultScope]);
+
   const doScan = useMutation({
     mutationFn: (path: string) => api.organizerScan(path),
     onSuccess: (data) => {
       setScan(data);
       setPlan(null);
       setMessage(`Clasificados ${data.length} proyectos/carpetas`);
+      setStage(3);
     },
     onError: (e) => setMessage(String(e)),
   });
 
   const doPlan = useMutation({
     mutationFn: () =>
-      api.organizerBuildPlan(defaultScope, mode, null),
+      api.organizerBuildPlan(
+        scopeForProject || defaultScope,
+        mode,
+        selectedProjectId ? [selectedProjectId] : null,
+      ),
     onSuccess: (data) => {
       setPlan(data);
       setMessage(`Plan ${data.session.mode}: ${data.items.length} acciones`);
+      setStage(4);
     },
     onError: (e) => setMessage(String(e)),
   });
@@ -57,9 +102,32 @@ export function OrganizerView() {
       if (plan) {
         void api.organizerGetPlan(plan.session.id).then(setPlan);
       }
+      setStage(5);
     },
     onError: (e) => setMessage(String(e)),
   });
+
+  async function skipItem(itemId: string) {
+    if (!plan) return;
+    await api.organizerUpdatePlanItem({
+      item_id: itemId,
+      action: "skip",
+      status: "skipped",
+    });
+    const refreshed = await api.organizerGetPlan(plan.session.id);
+    setPlan(refreshed);
+  }
+
+  async function restoreItem(itemId: string, action: string) {
+    if (!plan) return;
+    await api.organizerUpdatePlanItem({
+      item_id: itemId,
+      action,
+      status: "pending",
+    });
+    const refreshed = await api.organizerGetPlan(plan.session.id);
+    setPlan(refreshed);
+  }
 
   return (
     <div className="flex h-full flex-col bg-bg">
@@ -69,24 +137,65 @@ export function OrganizerView() {
             Organizador masivo
           </h1>
           <p className="text-[12px] text-muted">
-            Escanear · clasificar · plan · reorganizar (virtual o físico con
-            backup)
+            5 etapas · proyecto único por defecto · plan editable
           </p>
         </div>
         <FolderTree size={18} className="text-muted" />
       </header>
 
+      <nav className="flex gap-1 border-b border-border px-4 py-2">
+        {([1, 2, 3, 4, 5] as Stage[]).map((s) => (
+          <button
+            key={s}
+            type="button"
+            onClick={() => setStage(s)}
+            className={cn(
+              "h-[32px] rounded-[4px] px-2.5 text-[12px]",
+              stage === s
+                ? "bg-selection text-text"
+                : "text-muted hover:bg-elevated hover:text-text",
+            )}
+          >
+            {s}. {STAGE_LABELS[s]}
+          </button>
+        ))}
+      </nav>
+
       <div className="flex flex-wrap items-end gap-3 border-b border-border px-4 py-3">
-        <label className="flex min-w-[280px] flex-1 flex-col gap-1 text-[12px] text-muted">
-          Alcance (raíz autorizada)
+        <label className="flex min-w-[220px] flex-1 flex-col gap-1 text-[12px] text-muted">
+          Proyecto (por defecto uno)
           <select
             className="h-[34px] rounded-[var(--radius-sm)] border border-border bg-elevated px-2 text-[13px] text-text"
-            value={defaultScope}
+            value={selectedProjectId}
+            onChange={(e) => {
+              setSelectedProjectId(e.target.value);
+              setScan(null);
+              setPlan(null);
+              setStage(1);
+            }}
+          >
+            {projectList.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.code ?? "—"} · {p.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex min-w-[200px] flex-col gap-1 text-[12px] text-muted">
+          Alcance
+          <select
+            className="h-[34px] rounded-[var(--radius-sm)] border border-border bg-elevated px-2 text-[13px] text-text"
+            value={scope || scopeForProject}
             onChange={(e) => setScope(e.target.value)}
           >
+            {selectedProject && (
+              <option value={scopeForProject}>
+                Solo proyecto ({selectedProject.root_relative_path})
+              </option>
+            )}
             {roots.map((r) => (
               <option key={r.id} value={r.absolute_path}>
-                {r.label || r.absolute_path}
+                Raíz: {r.label || r.absolute_path}
                 {r.is_primary ? " (principal)" : ""}
               </option>
             ))}
@@ -108,8 +217,11 @@ export function OrganizerView() {
         <Button
           type="button"
           variant="secondary"
-          disabled={!defaultScope || doScan.isPending}
-          onClick={() => doScan.mutate(defaultScope)}
+          disabled={!scopeForProject || doScan.isPending}
+          onClick={() => {
+            setStage(2);
+            doScan.mutate(scopeForProject || defaultScope);
+          }}
         >
           <ScanSearch size={14} className="mr-1.5" />
           Escanear
@@ -117,7 +229,7 @@ export function OrganizerView() {
         <Button
           type="button"
           variant="secondary"
-          disabled={!defaultScope || doPlan.isPending}
+          disabled={!scopeForProject || doPlan.isPending}
           onClick={() => doPlan.mutate()}
         >
           Generar plan
@@ -167,13 +279,15 @@ export function OrganizerView() {
             </div>
           ))}
           {!scan && (
-            <p className="text-[13px] text-muted">Ejecute un escaneo.</p>
+            <p className="text-[13px] text-muted">
+              Etapa 1–2: elija un proyecto y ejecute escaneo.
+            </p>
           )}
         </section>
 
         <section className="min-h-0 overflow-auto p-4">
           <h2 className="mb-2 text-[12px] font-semibold uppercase text-muted">
-            Plan {plan ? `(${plan.session.status})` : ""}
+            Plan editable {plan ? `(${plan.session.status})` : ""}
           </h2>
           {plan ? (
             <table className="w-full text-left text-[12px]">
@@ -184,6 +298,7 @@ export function OrganizerView() {
                   <th className="py-1">Origen</th>
                   <th className="py-1">Destino</th>
                   <th className="py-1">Estado</th>
+                  <th className="py-1">Editar</th>
                 </tr>
               </thead>
               <tbody>
@@ -198,12 +313,42 @@ export function OrganizerView() {
                       {it.target_relative_path || "—"}
                     </td>
                     <td className="py-1 text-muted">{it.status}</td>
+                    <td className="py-1">
+                      {plan.session.status !== "applied" &&
+                        it.status === "pending" && (
+                          <button
+                            type="button"
+                            className="inline-flex items-center gap-1 text-[11px] text-warn hover:underline"
+                            onClick={() => void skipItem(it.id)}
+                            title="Omitir"
+                          >
+                            <SkipForward size={12} /> Omitir
+                          </button>
+                        )}
+                      {plan.session.status !== "applied" &&
+                        it.status === "skipped" && (
+                          <button
+                            type="button"
+                            className="inline-flex items-center gap-1 text-[11px] text-accent hover:underline"
+                            onClick={() =>
+                              void restoreItem(
+                                it.id,
+                                it.action === "skip" ? "map_virtual" : it.action,
+                              )
+                            }
+                          >
+                            <Check size={12} /> Restaurar
+                          </button>
+                        )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           ) : (
-            <p className="text-[13px] text-muted">Genere un plan para revisar.</p>
+            <p className="text-[13px] text-muted">
+              Etapa 4: genere un plan para revisar y editar (omitir ítems).
+            </p>
           )}
         </section>
       </div>

@@ -1,9 +1,11 @@
 //! Smart virtual category mapping for non-standard project folder layouts.
 //! Maps existing folder names → IngManager category keys without renaming.
+//! Supports project-code prefixes: `1090 - MODELOS`, `1090_MODELOS`, etc.
 
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::engineering_files::{strip_leading_aann_public, strip_project_code_prefix};
 use crate::models::STANDARD_FOLDERS;
 
 /// Alias table: normalized folder name → category key.
@@ -53,14 +55,63 @@ fn normalize_folder_name(name: &str) -> String {
         .replace('ñ', "n")
 }
 
+/// Candidate tokens to look up in the alias map (original + stripped prefixes).
+fn folder_lookup_tokens(folder_name: &str, project_codes: &[String]) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let raw = folder_name.trim().to_string();
+    if !raw.is_empty() {
+        tokens.push(raw.clone());
+    }
+    let stripped_codes = strip_project_code_prefix(&raw, project_codes);
+    if !stripped_codes.is_empty() && !stripped_codes.eq_ignore_ascii_case(&raw) {
+        tokens.push(stripped_codes);
+    }
+    let stripped_aann = strip_leading_aann_public(&raw);
+    if !stripped_aann.is_empty()
+        && !tokens
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case(&stripped_aann))
+    {
+        tokens.push(stripped_aann);
+    }
+    tokens
+}
+
 /// Infer category key from a single folder name (first path segment under project).
 pub fn map_folder_name_to_key(folder_name: &str) -> Option<&'static str> {
-    let norm = normalize_folder_name(folder_name);
-    alias_map().get(norm.as_str()).copied()
+    map_folder_name_to_key_with_codes(folder_name, &[])
+}
+
+/// Same as [`map_folder_name_to_key`] but strips known project codes first.
+pub fn map_folder_name_to_key_with_codes(
+    folder_name: &str,
+    project_codes: &[String],
+) -> Option<&'static str> {
+    let aliases = alias_map();
+    for token in folder_lookup_tokens(folder_name, project_codes) {
+        let norm = normalize_folder_name(&token);
+        if let Some(key) = aliases.get(norm.as_str()) {
+            return Some(*key);
+        }
+        // Also try without numbered `NN_` prefix already in standard names
+        if let Some((_, rest)) = norm.split_once('_') {
+            if let Some(key) = aliases.get(rest) {
+                return Some(*key);
+            }
+        }
+    }
+    None
 }
 
 /// Infer category from a path relative to the project root (may include nested segments).
 pub fn infer_category_key_flexible(project_relative: &str) -> Option<&'static str> {
+    infer_category_key_flexible_with_codes(project_relative, &[])
+}
+
+pub fn infer_category_key_flexible_with_codes(
+    project_relative: &str,
+    project_codes: &[String],
+) -> Option<&'static str> {
     let first = project_relative
         .split(['/', '\\'])
         .next()
@@ -69,7 +120,7 @@ pub fn infer_category_key_flexible(project_relative: &str) -> Option<&'static st
     if first.is_empty() {
         return None;
     }
-    map_folder_name_to_key(first)
+    map_folder_name_to_key_with_codes(first, project_codes)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,8 +135,26 @@ pub struct CategoryMapping {
 /// Build category rows for a project directory using smart mapping.
 /// Unmatched standard categories keep their default relative_path (for create-later).
 pub fn map_project_categories(project_dir: &Path) -> Vec<CategoryMapping> {
-    let aliases = alias_map();
+    map_project_categories_with_codes(project_dir, &[])
+}
+
+pub fn map_project_categories_with_codes(
+    project_dir: &Path,
+    project_codes: &[String],
+) -> Vec<CategoryMapping> {
     let mut found: HashMap<&'static str, String> = HashMap::new();
+
+    // Prefer code from folder name itself (e.g. project dir `1090`)
+    let mut codes = project_codes.to_vec();
+    if let Some(name) = project_dir.file_name().map(|n| n.to_string_lossy().to_string()) {
+        let digitish: String = name
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
+        if digitish.len() >= 2 && digitish.len() <= 8 && !codes.iter().any(|c| c == &digitish) {
+            codes.push(digitish);
+        }
+    }
 
     if let Ok(rd) = std::fs::read_dir(project_dir) {
         for entry in rd.flatten() {
@@ -96,9 +165,8 @@ pub fn map_project_categories(project_dir: &Path) -> Vec<CategoryMapping> {
             if name.starts_with('.') {
                 continue;
             }
-            let norm = normalize_folder_name(&name);
-            if let Some(key) = aliases.get(norm.as_str()) {
-                found.entry(*key).or_insert(name);
+            if let Some(key) = map_folder_name_to_key_with_codes(&name, &codes) {
+                found.entry(key).or_insert(name);
             }
         }
     }
@@ -152,6 +220,28 @@ mod tests {
     }
 
     #[test]
+    fn maps_project_code_prefixed_folders() {
+        let codes = vec!["1090".into()];
+        assert_eq!(
+            map_folder_name_to_key_with_codes("1090 - MODELOS", &codes),
+            Some("modelos")
+        );
+        assert_eq!(
+            map_folder_name_to_key_with_codes("1090_PLANOS", &codes),
+            Some("planos")
+        );
+        assert_eq!(
+            map_folder_name_to_key_with_codes("1090-MEMORIAS", &codes),
+            Some("memorias")
+        );
+        // Heuristic without explicit codes
+        assert_eq!(
+            map_folder_name_to_key("1090 - MODELOS"),
+            Some("modelos")
+        );
+    }
+
+    #[test]
     fn maps_project_tree() {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join("Modelos")).unwrap();
@@ -167,6 +257,18 @@ mod tests {
     }
 
     #[test]
+    fn maps_prefixed_tree_under_project_1090() {
+        let dir = tempdir().unwrap();
+        let proj = dir.path().join("1090");
+        fs::create_dir_all(proj.join("1090 - MODELOS")).unwrap();
+        fs::create_dir_all(proj.join("1090 - PLANOS")).unwrap();
+        let mapped = map_project_categories(&proj);
+        let modelos = mapped.iter().find(|m| m.key == "modelos").unwrap();
+        assert!(modelos.matched);
+        assert_eq!(modelos.relative_path, "1090 - MODELOS");
+    }
+
+    #[test]
     fn flexible_infer() {
         assert_eq!(
             infer_category_key_flexible("Modelos/SAP/foo.sdb"),
@@ -174,6 +276,10 @@ mod tests {
         );
         assert_eq!(
             infer_category_key_flexible("02_MODELOS/x.rvt"),
+            Some("modelos")
+        );
+        assert_eq!(
+            infer_category_key_flexible("1090 - MODELOS/foo.sdb"),
             Some("modelos")
         );
     }

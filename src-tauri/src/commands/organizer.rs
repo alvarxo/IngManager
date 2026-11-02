@@ -50,6 +50,14 @@ pub async fn organizer_apply_plan(
 }
 
 #[tauri::command]
+pub async fn organizer_update_plan_item(
+    state: State<'_, AppState>,
+    input: organizer::UpdatePlanItemInput,
+) -> AppResult<organizer::OrganizerPlanItem> {
+    organizer::update_plan_item(&state.pool, input).await
+}
+
+#[tauri::command]
 pub async fn organizer_list_sessions(
     state: State<'_, AppState>,
 ) -> AppResult<Vec<OrganizerSession>> {

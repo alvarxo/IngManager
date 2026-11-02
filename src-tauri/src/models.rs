@@ -58,7 +58,12 @@ pub struct CategorySummary {
     pub name: String,
     pub relative_path: String,
     pub sort_order: i64,
+    /// Physical indexed files in the category.
     pub file_count: i64,
+    /// Principal engineering models (meaningful for `modelos`).
+    pub model_count: i64,
+    /// Logical documents registered in the category.
+    pub document_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]

@@ -157,7 +157,13 @@ fn parse_trailing_paren_num(s: &str) -> Option<String> {
 }
 
 fn normalize_stem(s: &str) -> String {
-    s.trim().to_lowercase()
+    // Strip project-code style prefixes; keep SIN/CON CAMIONES (and similar) distinct.
+    crate::engineering_files::normalize_group_key(s, &[])
+}
+
+/// Normalize with explicit project codes (preferred when known).
+pub fn normalize_stem_with_codes(s: &str, project_codes: &[String]) -> String {
+    crate::engineering_files::normalize_group_key(s, project_codes)
 }
 
 /// Wait until size+mtime are stable (or timeout). Returns false if file vanishes.

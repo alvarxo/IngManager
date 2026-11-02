@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { filterAndSortEntries, parentSubpath } from "./file-utils";
+import {
+  filterAndSortEntries,
+  filterEngineeringAuxiliaries,
+  parentSubpath,
+} from "./file-utils";
 import type { FsEntry } from "./types";
 
 function entry(partial: Partial<FsEntry> & Pick<FsEntry, "name">): FsEntry {
@@ -33,5 +37,16 @@ describe("file-utils", () => {
     expect(result.map((e) => e.name)).toEqual(["a.rvt"]);
     const sorted = filterAndSortEntries(list, "", "name", "asc");
     expect(sorted[0]?.name).toBe("docs");
+  });
+
+  it("hides SAP auxiliaries when principal present", () => {
+    const list = [
+      entry({ name: "A.sdb", extension: "sdb", is_engineering: true }),
+      entry({ name: "A.log", extension: "log" }),
+      entry({ name: "nota.pdf", extension: "pdf" }),
+    ];
+    const hidden = filterEngineeringAuxiliaries(list, false);
+    expect(hidden.map((e) => e.name).sort()).toEqual(["A.sdb", "nota.pdf"]);
+    expect(filterEngineeringAuxiliaries(list, true)).toHaveLength(3);
   });
 });

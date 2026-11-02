@@ -35,9 +35,11 @@ import {
   type SortDir,
   type SortKey,
 } from "@/lib/file-utils";
+import { useNativeFileDrop } from "@/hooks/useNativeFileDrop";
 import { useClipboardStore } from "@/stores/clipboard-store";
 import { useUiStore } from "@/stores/ui-store";
 import { Button } from "./ui/button";
+import { ExternalDropDialog } from "./ExternalDropDialog";
 
 interface Props {
   projectId: string;
@@ -70,8 +72,14 @@ export function FileManager({ projectId, categoryKey }: Props) {
   );
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [osDragOver, setOsDragOver] = useState(false);
   const [showAuxiliaries, setShowAuxiliaries] = useState(false);
+  const [externalDrop, setExternalDrop] = useState<{
+    paths: string[];
+    preferMove: boolean;
+  } | null>(null);
   const tableRef = useRef<HTMLDivElement>(null);
+  const dropZoneRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setSubpath("");
@@ -359,26 +367,34 @@ export function FileManager({ projectId, categoryKey }: Props) {
     e.dataTransfer.effectAllowed = "copyMove";
   }
 
-  async function onDrop(e: DragEvent) {
+  /** Internal moves/copies only — OS Explorer drops use Tauri onDragDropEvent. */
+  async function onInternalDrop(e: DragEvent) {
     e.preventDefault();
     setDragOver(false);
     if (!currentPath) return;
     const raw = e.dataTransfer.getData("application/x-ingmanager-paths");
-    if (raw) {
-      const paths = JSON.parse(raw) as string[];
-      const move = !e.ctrlKey;
-      if (move) {
-        await withEngineeringAck(
-          () => api.moveEntries(paths, currentPath, "rename", false),
-          () => api.moveEntries(paths, currentPath, "rename", true),
-        );
-      } else {
-        await runOp(() => api.copyEntries(paths, currentPath));
-      }
-      return;
+    if (!raw) return;
+    const paths = JSON.parse(raw) as string[];
+    const move = !e.ctrlKey;
+    if (move) {
+      await withEngineeringAck(
+        () => api.moveEntries(paths, currentPath, "rename", false),
+        () => api.moveEntries(paths, currentPath, "rename", true),
+      );
+    } else {
+      await runOp(() => api.copyEntries(paths, currentPath));
     }
-    // External files via HTML5 drop are limited in Tauri webview; use Import button.
   }
+
+  useNativeFileDrop(dropZoneRef, {
+    enabled: !!currentPath && !externalDrop,
+    onDrop: () => undefined,
+    onDropWithModifiers: (paths, preferMove) => {
+      if (!currentPath || paths.length === 0) return;
+      setExternalDrop({ paths, preferMove });
+    },
+    onActiveChange: setOsDragOver,
+  });
 
   function toggleSort(key: SortKey) {
     if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -496,16 +512,20 @@ export function FileManager({ projectId, categoryKey }: Props) {
       )}
 
       <div
+        ref={dropZoneRef}
         className={cn(
           "min-h-0 flex-1 overflow-auto",
-          dragOver && "outline outline-1 outline-accent",
+          (dragOver || osDragOver) && "outline outline-1 outline-accent",
         )}
         onDragOver={(e) => {
-          e.preventDefault();
-          setDragOver(true);
+          // Allow HTML5 internal row drags; OS file drops are handled natively.
+          if (e.dataTransfer.types.includes("application/x-ingmanager-paths")) {
+            e.preventDefault();
+            setDragOver(true);
+          }
         }}
         onDragLeave={() => setDragOver(false)}
-        onDrop={onDrop}
+        onDrop={onInternalDrop}
         onContextMenu={(e) => onContextMenu(e, null)}
       >
         {folderQuery.isLoading || entriesQuery.isLoading ? (
@@ -595,6 +615,21 @@ export function FileManager({ projectId, categoryKey }: Props) {
           </table>
         )}
       </div>
+
+      {externalDrop && currentPath && (
+        <ExternalDropDialog
+          destDir={currentPath}
+          sourcePaths={externalDrop.paths}
+          preferMove={externalDrop.preferMove}
+          onClose={() => setExternalDrop(null)}
+          onCompleted={(message, warning) => {
+            setExternalDrop(null);
+            setStatus(message);
+            setWarning(warning);
+            void refresh();
+          }}
+        />
+      )}
 
       {contextMenu && (
         <div

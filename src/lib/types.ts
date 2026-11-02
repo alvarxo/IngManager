@@ -113,6 +113,34 @@ export interface FileOpResult {
 
 export type ConflictPolicy = "rename" | "overwrite" | "abort";
 
+export type ExternalDropMode = "copy" | "move";
+
+export interface ExternalDropItemPreview {
+  source_path: string;
+  file_name: string;
+  is_directory: boolean;
+  size_bytes: number | null;
+  conflict: boolean;
+  planned_name: string;
+  is_engineering: boolean;
+}
+
+export interface ExternalDropPreview {
+  dest_dir: string;
+  items: ExternalDropItemPreview[];
+  conflict_count: number;
+  engineering_warning: string | null;
+}
+
+export interface ExternalDropProgress {
+  phase: string;
+  current: number;
+  total: number;
+  current_path: string | null;
+  done: boolean;
+  message: string | null;
+}
+
 export interface EntryProperties {
   name: string;
   absolute_path: string;

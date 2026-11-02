@@ -4,7 +4,7 @@ use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
@@ -833,4 +833,277 @@ pub async fn open_path(state: State<'_, AppState>, absolute_path: String) -> App
     }
     open::that(&path).map_err(|e| AppError::msg(format!("No se pudo abrir: {e}")))?;
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalDropMode {
+    Copy,
+    Move,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalDropItemPreview {
+    pub source_path: String,
+    pub file_name: String,
+    pub is_directory: bool,
+    pub size_bytes: Option<i64>,
+    pub conflict: bool,
+    pub planned_name: String,
+    pub is_engineering: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalDropPreview {
+    pub dest_dir: String,
+    pub items: Vec<ExternalDropItemPreview>,
+    pub conflict_count: usize,
+    pub engineering_warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalDropProgress {
+    pub phase: String,
+    pub current: usize,
+    pub total: usize,
+    pub current_path: Option<String>,
+    pub done: bool,
+    pub message: Option<String>,
+}
+
+/// Preview OS/external paths before copy/move into a managed folder (File Manager drop).
+#[tauri::command]
+pub async fn preview_external_drop(
+    state: State<'_, AppState>,
+    source_paths: Vec<String>,
+    dest_dir: String,
+    conflict_policy: Option<ConflictPolicy>,
+) -> AppResult<ExternalDropPreview> {
+    let policy = conflict_policy.unwrap_or(ConflictPolicy::Rename);
+    let (_root, dest) = resolve_abs_under_roots(&state, &dest_dir).await?;
+    if !dest.is_dir() {
+        return Err(AppError::msg("El destino no es una carpeta"));
+    }
+
+    let mut items = Vec::new();
+    let mut eng = Vec::new();
+    for s in source_paths {
+        let src = PathBuf::from(&s);
+        if !src.exists() {
+            return Err(AppError::msg(format!("No existe: {s}")));
+        }
+        let name = src
+            .file_name()
+            .ok_or_else(|| AppError::msg("Nombre inválido"))?
+            .to_string_lossy()
+            .to_string();
+        let meta = fs::metadata(&src)?;
+        let is_directory = meta.is_dir();
+        let conflict = dest.join(&name).exists();
+        let planned = resolve_dest_path(&dest, &name, &policy)?;
+        let planned_name = planned
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| name.clone());
+        if is_engineering_model(&src) {
+            eng.push(src.clone());
+        }
+        items.push(ExternalDropItemPreview {
+            source_path: src.display().to_string(),
+            file_name: name,
+            is_directory,
+            size_bytes: if is_directory {
+                None
+            } else {
+                Some(meta.len() as i64)
+            },
+            conflict,
+            planned_name,
+            is_engineering: is_engineering_model(&src),
+        });
+    }
+
+    let conflict_count = items.iter().filter(|i| i.conflict).count();
+    Ok(ExternalDropPreview {
+        dest_dir: dest.display().to_string(),
+        items,
+        conflict_count,
+        engineering_warning: engineering_warning_message(&eng),
+    })
+}
+
+/// Apply OS/external drop: copy (default) or move into dest; emits `external-drop-progress`.
+#[tauri::command]
+pub async fn apply_external_drop(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    source_paths: Vec<String>,
+    dest_dir: String,
+    mode: Option<ExternalDropMode>,
+    conflict_policy: Option<ConflictPolicy>,
+) -> AppResult<FileOpResult> {
+    let mode = mode.unwrap_or(ExternalDropMode::Copy);
+    let policy = conflict_policy.unwrap_or(ConflictPolicy::Rename);
+    let (root, dest) = resolve_abs_under_roots(&state, &dest_dir).await?;
+    if !dest.is_dir() {
+        return Err(AppError::msg("El destino no es una carpeta"));
+    }
+
+    let total = source_paths.len();
+    let mut out = Vec::new();
+    let mut eng = Vec::new();
+
+    let _ = app.emit(
+        "external-drop-progress",
+        ExternalDropProgress {
+            phase: "start".into(),
+            current: 0,
+            total,
+            current_path: None,
+            done: false,
+            message: Some(match mode {
+                ExternalDropMode::Copy => "Importando (copia)…".into(),
+                ExternalDropMode::Move => "Importando (mover)…".into(),
+            }),
+        },
+    );
+
+    for (idx, s) in source_paths.iter().enumerate() {
+        let src = PathBuf::from(s);
+        if !src.exists() {
+            let _ = app.emit(
+                "external-drop-progress",
+                ExternalDropProgress {
+                    phase: "error".into(),
+                    current: idx,
+                    total,
+                    current_path: Some(s.clone()),
+                    done: true,
+                    message: Some(format!("No existe: {s}")),
+                },
+            );
+            return Err(AppError::msg(format!("No existe: {s}")));
+        }
+        if is_engineering_model(&src) {
+            eng.push(src.clone());
+        }
+
+        let _ = app.emit(
+            "external-drop-progress",
+            ExternalDropProgress {
+                phase: "item".into(),
+                current: idx + 1,
+                total,
+                current_path: Some(src.display().to_string()),
+                done: false,
+                message: None,
+            },
+        );
+
+        let name = src
+            .file_name()
+            .ok_or_else(|| AppError::msg("Nombre inválido"))?
+            .to_string_lossy()
+            .to_string();
+        let target = resolve_dest_path(&dest, &name, &policy)?;
+        if matches!(policy, ConflictPolicy::Overwrite) && target.exists() {
+            if target.is_dir() {
+                fs::remove_dir_all(&target)?;
+            } else {
+                fs::remove_file(&target)?;
+            }
+        }
+        let target = ensure_under_root(&root, &target)?;
+
+        // Prefer in-root move when source is already under an authorized root.
+        let managed_src = crate::project_paths::load_root_paths(&state.pool)
+            .await
+            .ok()
+            .and_then(|roots| {
+                crate::project_paths::ensure_under_any_root(&roots, &src)
+                    .ok()
+                    .map(|(r, p)| (r.to_path_buf(), p.to_path_buf()))
+            });
+
+        match mode {
+            ExternalDropMode::Copy => {
+                copy_recursively(&src, &target)?;
+            }
+            ExternalDropMode::Move => {
+                if let Some((src_root, managed_path)) = managed_src {
+                    ensure_not_into_self(&managed_path, &dest)?;
+                    let old_rel = rel_from_root(&src_root, &managed_path).ok();
+                    move_entry(&managed_path, &target)?;
+                    if let Some(old_rel) = old_rel {
+                        let _ = sqlx::query(
+                            "DELETE FROM indexed_files WHERE relative_path = ? OR relative_path LIKE ?",
+                        )
+                        .bind(&old_rel)
+                        .bind(format!("{old_rel}/%"))
+                        .execute(&state.pool)
+                        .await;
+                    }
+                } else {
+                    copy_recursively(&src, &target)?;
+                    if src.is_dir() {
+                        fs::remove_dir_all(&src).map_err(|e| {
+                            AppError::msg(format!(
+                                "Copiado a destino, pero no se pudo borrar origen: {e}"
+                            ))
+                        })?;
+                    } else {
+                        fs::remove_file(&src).map_err(|e| {
+                            AppError::msg(format!(
+                                "Copiado a destino, pero no se pudo borrar origen: {e}"
+                            ))
+                        })?;
+                    }
+                }
+            }
+        }
+
+        if target.is_dir() {
+            index_sync::refresh_subtree(&state.pool, &root, &target).await?;
+        } else {
+            index_sync::upsert_path(&state.pool, &root, &target).await?;
+        }
+        out.push(target.display().to_string());
+        let op = match mode {
+            ExternalDropMode::Copy => "external_drop_copy",
+            ExternalDropMode::Move => "external_drop_move",
+        };
+        let _ = index_sync::log_file_operation(
+            &state.pool,
+            None,
+            op,
+            Some(s),
+            Some(&rel_from_root(&root, &target)?),
+            "completed",
+            None,
+        )
+        .await;
+    }
+
+    let message = match mode {
+        ExternalDropMode::Copy => "Importación por drop completada (copia)",
+        ExternalDropMode::Move => "Importación por drop completada (mover)",
+    };
+    let warning = engineering_warning_message(&eng);
+    let _ = app.emit(
+        "external-drop-progress",
+        ExternalDropProgress {
+            phase: "done".into(),
+            current: total,
+            total,
+            current_path: None,
+            done: true,
+            message: Some(message.into()),
+        },
+    );
+
+    Ok(FileOpResult {
+        paths: out,
+        warning,
+        message: Some(message.into()),
+    })
 }

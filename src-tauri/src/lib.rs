@@ -116,6 +116,8 @@ pub fn run() {
             commands::file_manager::copy_entries,
             commands::file_manager::move_entries,
             commands::file_manager::import_files,
+            commands::file_manager::preview_external_drop,
+            commands::file_manager::apply_external_drop,
             commands::file_manager::delete_to_trash,
             commands::file_manager::list_trash,
             commands::file_manager::restore_trash_item,

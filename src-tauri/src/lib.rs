@@ -7,6 +7,9 @@ mod db;
 #[cfg(test)]
 mod db_tests;
 mod doc_codes;
+mod engineering_files;
+#[cfg(test)]
+mod engineering_sap_tests;
 mod error;
 #[cfg(test)]
 mod flexibility_tests;
@@ -124,8 +127,12 @@ pub fn run() {
             commands::organizer::organizer_build_plan,
             commands::organizer::organizer_get_plan,
             commands::organizer::organizer_apply_plan,
+            commands::organizer::organizer_update_plan_item,
             commands::organizer::organizer_list_sessions,
             commands::organizer::list_project_folder_mappings,
+            commands::engineering::list_engineering_groups,
+            commands::engineering::list_category_files_filtered,
+            commands::engineering::bulk_register_engineering_docs,
             commands::inbox_cmd::inbox_ensure_dir,
             commands::inbox_cmd::inbox_list,
             commands::inbox_cmd::inbox_stage_files,

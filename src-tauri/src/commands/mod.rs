@@ -2,6 +2,7 @@ pub mod audit_cmd;
 pub mod auto_version_cmd;
 pub mod backup;
 pub mod documents;
+pub mod engineering;
 pub mod file_manager;
 pub mod files;
 pub mod import_wizard;

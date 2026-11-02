@@ -9,7 +9,9 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-use crate::category_mapping::{map_folder_name_to_key, map_project_categories};
+use crate::category_mapping::{
+    map_folder_name_to_key_with_codes, map_project_categories_with_codes,
+};
 use crate::error::{AppError, AppResult};
 use crate::models::STANDARD_FOLDERS;
 use crate::path_security::{ensure_under_root, path_is_under};
@@ -113,10 +115,12 @@ pub async fn scan_scope(
             continue;
         }
         seen_paths.insert(abs.display().to_string());
+        let codes = codes_for_project(pool, id).await.unwrap_or_default();
         items.push(classify_project_dir(
             Some(id.clone()),
             Some(name.clone()),
             &abs,
+            &codes,
         ));
     }
 
@@ -136,13 +140,14 @@ pub async fn scan_scope(
                 continue;
             }
             // Heuristic: directory with at least one subfolder or known alias
-            let mapped = map_project_categories(&path);
+            let folder_codes = heuristic_codes_from_path(&path);
+            let mapped = map_project_categories_with_codes(&path, &folder_codes);
             let any_match = mapped.iter().any(|m| m.matched);
             let has_sub = fs::read_dir(&path)
                 .map(|rd| rd.filter_map(|e| e.ok()).any(|e| e.path().is_dir()))
                 .unwrap_or(false);
             if any_match || has_sub {
-                items.push(classify_project_dir(None, None, &path));
+                items.push(classify_project_dir(None, None, &path, &folder_codes));
             }
         }
     }
@@ -151,16 +156,58 @@ pub async fn scan_scope(
     Ok(items)
 }
 
+fn heuristic_codes_from_path(abs: &Path) -> Vec<String> {
+    let mut codes = Vec::new();
+    if let Some(name) = abs.file_name().map(|n| n.to_string_lossy().to_string()) {
+        let digitish: String = name
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
+        if digitish.len() >= 2 && digitish.len() <= 8 {
+            codes.push(digitish);
+        }
+    }
+    codes
+}
+
+async fn codes_for_project(pool: &SqlitePool, project_id: &str) -> AppResult<Vec<String>> {
+    let row: Option<(Option<String>, String)> =
+        sqlx::query_as("SELECT code, root_relative_path FROM projects WHERE id = ?")
+            .bind(project_id)
+            .fetch_optional(pool)
+            .await?;
+    let mut codes = Vec::new();
+    if let Some((code, rel)) = row {
+        if let Some(c) = code.filter(|s| !s.trim().is_empty()) {
+            codes.push(c.trim().to_string());
+        }
+        if let Some(base) = Path::new(&rel)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+        {
+            let digitish: String = base
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect();
+            if digitish.len() >= 2 && !codes.iter().any(|c| c == &digitish) {
+                codes.push(digitish);
+            }
+        }
+    }
+    Ok(codes)
+}
+
 fn classify_project_dir(
     project_id: Option<String>,
     project_name: Option<String>,
     abs: &Path,
+    project_codes: &[String],
 ) -> OrganizerScanItem {
     let folder_name = abs
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| abs.display().to_string());
-    let mapped = map_project_categories(abs);
+    let mapped = map_project_categories_with_codes(abs, project_codes);
     let classified: Vec<ClassifiedFolder> = mapped
         .iter()
         .map(|m| {
@@ -193,7 +240,7 @@ fn classify_project_dir(
             if name.starts_with('.') {
                 continue;
             }
-            if map_folder_name_to_key(&name).is_none() {
+            if map_folder_name_to_key_with_codes(&name, project_codes).is_none() {
                 unmatched.push(name);
             }
         }
@@ -397,6 +444,86 @@ pub async fn get_plan(pool: &SqlitePool, session_id: &str) -> AppResult<Organize
     Ok(OrganizerPlanResult { session, items })
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdatePlanItemInput {
+    pub item_id: String,
+    pub action: Option<String>,
+    pub category_key: Option<String>,
+    pub target_relative_path: Option<String>,
+    pub status: Option<String>,
+    pub detail: Option<String>,
+}
+
+/// Edit a draft/planned item before apply (skip, remap category, change action).
+pub async fn update_plan_item(
+    pool: &SqlitePool,
+    input: UpdatePlanItemInput,
+) -> AppResult<OrganizerPlanItem> {
+    let existing = sqlx::query_as::<_, OrganizerPlanItem>(
+        "SELECT id, session_id, project_id, project_folder_name, category_key,
+                source_relative_path, target_relative_path, action, confidence,
+                status, detail, sort_order, created_at
+         FROM organizer_plan_items WHERE id = ?",
+    )
+    .bind(&input.item_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| AppError::msg("Ítem de plan no encontrado"))?;
+
+    let session = fetch_session(pool, &existing.session_id).await?;
+    if session.status == "applied" {
+        return Err(AppError::msg("La sesión ya fue aplicada; no se puede editar"));
+    }
+
+    let action = input.action.unwrap_or(existing.action);
+    if !["map_virtual", "rename_folder", "move_contents", "create_standard", "skip"]
+        .contains(&action.as_str())
+    {
+        return Err(AppError::msg("Acción de plan inválida"));
+    }
+    let status = input.status.unwrap_or_else(|| {
+        if action == "skip" {
+            "skipped".into()
+        } else {
+            existing.status
+        }
+    });
+    if !["pending", "skipped"].contains(&status.as_str()) {
+        return Err(AppError::msg("Estado de ítem inválido para edición"));
+    }
+    let category_key = input.category_key.or(existing.category_key);
+    let target = input
+        .target_relative_path
+        .or(existing.target_relative_path);
+    let detail = input.detail.or(existing.detail);
+
+    sqlx::query(
+        "UPDATE organizer_plan_items SET
+            action = ?, category_key = ?, target_relative_path = ?,
+            status = ?, detail = ?
+         WHERE id = ?",
+    )
+    .bind(&action)
+    .bind(&category_key)
+    .bind(&target)
+    .bind(&status)
+    .bind(&detail)
+    .bind(&input.item_id)
+    .execute(pool)
+    .await?;
+
+    sqlx::query_as::<_, OrganizerPlanItem>(
+        "SELECT id, session_id, project_id, project_folder_name, category_key,
+                source_relative_path, target_relative_path, action, confidence,
+                status, detail, sort_order, created_at
+         FROM organizer_plan_items WHERE id = ?",
+    )
+    .bind(&input.item_id)
+    .fetch_one(pool)
+    .await
+    .map_err(AppError::from)
+}
+
 /// Apply plan: persist virtual mappings and/or physically reorganize with backup+journal.
 pub async fn apply_plan(pool: &SqlitePool, session_id: &str) -> AppResult<OrganizerApplyResult> {
     let session = fetch_session(pool, session_id).await?;
@@ -442,6 +569,14 @@ pub async fn apply_plan(pool: &SqlitePool, session_id: &str) -> AppResult<Organi
     let mut journal_entries = 0usize;
 
     for item in &plan.items {
+        if item.status == "skipped" || item.action == "skip" {
+            skipped += 1;
+            sqlx::query("UPDATE organizer_plan_items SET status = 'skipped' WHERE id = ?")
+                .bind(&item.id)
+                .execute(pool)
+                .await?;
+            continue;
+        }
         match apply_one(pool, &session, item, &scope, &root_path).await {
             Ok(true) => {
                 applied += 1;

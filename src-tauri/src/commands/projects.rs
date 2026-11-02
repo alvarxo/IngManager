@@ -363,7 +363,7 @@ pub async fn list_project_categories(
     state: State<'_, AppState>,
     project_id: String,
 ) -> AppResult<Vec<CategorySummary>> {
-    let categories = sqlx::query_as::<_, CategorySummary>(
+    let mut categories = sqlx::query_as::<_, CategorySummary>(
         "SELECT
             c.key,
             c.name,
@@ -375,15 +375,66 @@ pub async fn list_project_categories(
                   AND f.category_key = c.key
                   AND f.is_directory = 0
                   AND f.is_available = 1
-            ), 0) AS file_count
+            ), 0) AS file_count,
+            0 AS model_count,
+            COALESCE((
+                SELECT COUNT(*) FROM documents d
+                WHERE d.project_id = c.project_id AND d.category_id = c.id
+            ), 0) AS document_count
          FROM categories c
          WHERE c.project_id = ?
          ORDER BY c.sort_order",
     )
-    .bind(project_id)
+    .bind(&project_id)
     .fetch_all(&state.pool)
     .await?;
+
+    // For modelos, count principal engineering groups (not every physical aux file).
+    if let Some(modelos) = categories.iter_mut().find(|c| c.key == "modelos") {
+        let names: Vec<(String,)> = sqlx::query_as(
+            "SELECT file_name FROM indexed_files
+             WHERE project_id = ? AND category_key = 'modelos'
+               AND is_directory = 0 AND is_available = 1",
+        )
+        .bind(&project_id)
+        .fetch_all(&state.pool)
+        .await?;
+        let codes = project_codes_for(&state.pool, &project_id).await?;
+        let file_names: Vec<String> = names.into_iter().map(|r| r.0).collect();
+        modelos.model_count =
+            crate::engineering_files::count_principals(&file_names, &codes) as i64;
+    }
+
     Ok(categories)
+}
+
+async fn project_codes_for(pool: &sqlx::SqlitePool, project_id: &str) -> AppResult<Vec<String>> {
+    let row: Option<(Option<String>, String)> =
+        sqlx::query_as("SELECT code, root_relative_path FROM projects WHERE id = ?")
+            .bind(project_id)
+            .fetch_optional(pool)
+            .await?;
+    let mut codes = Vec::new();
+    if let Some((code, rel)) = row {
+        if let Some(c) = code {
+            if !c.trim().is_empty() {
+                codes.push(c.trim().to_string());
+            }
+        }
+        if let Some(base) = std::path::Path::new(&rel)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+        {
+            let digitish: String = base
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect();
+            if digitish.len() >= 2 && !codes.iter().any(|c| c == &digitish) {
+                codes.push(digitish);
+            }
+        }
+    }
+    Ok(codes)
 }
 
 #[tauri::command]

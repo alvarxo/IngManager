@@ -75,6 +75,24 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
     onError: (e: Error) => setError(String(e)),
   });
 
+  const bulkReg = useMutation({
+    mutationFn: () =>
+      api.bulkRegisterEngineeringDocs({
+        project_id: projectId,
+        category_key: categoryKey,
+        assign_codes: true,
+      }),
+    onSuccess: async (r) => {
+      await qc.invalidateQueries({ queryKey: ["documents", projectId, categoryKey] });
+      await qc.invalidateQueries({ queryKey: ["categories", projectId] });
+      setError(null);
+      window.alert(
+        `Registrados ${r.created} modelos (sin copiar). Omitidos: ${r.skipped}.`,
+      );
+    },
+    onError: (e: Error) => setError(String(e)),
+  });
+
   const statuses = useMemo(() => {
     if (categoryKey === "memorias") return MEMORIA_STATUSES;
     return ["active", "archived", "obsoleta"];
@@ -104,6 +122,17 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
         <Button size="sm" onClick={() => setCreateOpen(true)}>
           <Plus size={14} /> Nuevo documento
         </Button>
+        {categoryKey === "modelos" && (
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={bulkReg.isPending}
+            onClick={() => bulkReg.mutate()}
+            title="Registrar documentos lógicos desde .sdb principales sin copiar archivos"
+          >
+            <FilePlus2 size={14} /> Registrar modelos…
+          </Button>
+        )}
         <label className="ml-auto flex items-center gap-2 text-[12px] text-muted">
           <input
             type="checkbox"

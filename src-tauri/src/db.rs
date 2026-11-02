@@ -81,6 +81,13 @@ async fn run_migrations(pool: &SqlitePool) -> AppResult<()> {
         include_str!("../migrations/006_organizer_inbox_versioning.sql"),
     )
     .await?;
+    apply_migration(
+        pool,
+        7,
+        "007_engineering_grouping",
+        include_str!("../migrations/007_engineering_grouping.sql"),
+    )
+    .await?;
 
     Ok(())
 }

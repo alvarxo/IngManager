@@ -47,6 +47,11 @@ import type {
   PendingVersionEvent,
   AutoVersionResult,
   FolderMappingRow,
+  EngineeringGroupDto,
+  BulkRegisterInput,
+  BulkRegisterResult,
+  UpdatePlanItemInput,
+  OrganizerPlanItem,
 } from "./types";
 
 export const api = {
@@ -348,10 +353,35 @@ export const api = {
     invoke<OrganizerPlanResult>("organizer_get_plan", { sessionId }),
   organizerApplyPlan: (sessionId: string) =>
     invoke<OrganizerApplyResult>("organizer_apply_plan", { sessionId }),
+  organizerUpdatePlanItem: (input: UpdatePlanItemInput) =>
+    invoke<OrganizerPlanItem>("organizer_update_plan_item", { input }),
   organizerListSessions: () =>
     invoke<OrganizerSession[]>("organizer_list_sessions"),
   listProjectFolderMappings: (projectId: string) =>
     invoke<FolderMappingRow[]>("list_project_folder_mappings", { projectId }),
+
+  listEngineeringGroups: (
+    projectId: string,
+    categoryKey: string,
+    includeAuxiliaries = true,
+  ) =>
+    invoke<EngineeringGroupDto[]>("list_engineering_groups", {
+      projectId,
+      categoryKey,
+      includeAuxiliaries,
+    }),
+  listCategoryFilesFiltered: (
+    projectId: string,
+    categoryKey: string,
+    showAuxiliaries = false,
+  ) =>
+    invoke<IndexedFile[]>("list_category_files_filtered", {
+      projectId,
+      categoryKey,
+      showAuxiliaries,
+    }),
+  bulkRegisterEngineeringDocs: (input: BulkRegisterInput) =>
+    invoke<BulkRegisterResult>("bulk_register_engineering_docs", { input }),
 
   inboxEnsureDir: () => invoke<string>("inbox_ensure_dir"),
   inboxList: () => invoke<InboxItem[]>("inbox_list"),

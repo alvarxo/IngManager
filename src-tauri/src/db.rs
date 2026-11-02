@@ -75,7 +75,7 @@ async fn apply_migration(
 
     let mut tx = pool.begin().await?;
     for statement in split_statements(sql) {
-        sqlx::query(statement).execute(&mut *tx).await.map_err(|e| {
+        sqlx::query(&statement).execute(&mut *tx).await.map_err(|e| {
             AppError::msg(format!(
                 "Migration {name} failed on statement: {e}\nSQL: {statement}"
             ))
@@ -90,10 +90,22 @@ async fn apply_migration(
     Ok(())
 }
 
-fn split_statements(sql: &str) -> Vec<&str> {
+fn split_statements(sql: &str) -> Vec<String> {
     sql.split(';')
-        .map(str::trim)
-        .filter(|s| !s.is_empty() && !s.starts_with("--"))
+        .filter_map(|chunk| {
+            let without_line_comments: String = chunk
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with("--"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let trimmed = without_line_comments.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        })
         .collect()
 }
 

@@ -251,6 +251,10 @@ export function DocumentInspector() {
 
         {inspectorTab === "doc-versions" && (
           <>
+            <p className="text-[11px] text-muted">
+              Versión = iteración de trabajo (archivos vinculados). Revisión
+              emitida = entrega con código (formatos en snapshot).
+            </p>
             <div className="text-[11px] font-semibold uppercase text-muted">
               Versiones internas
             </div>

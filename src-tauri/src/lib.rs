@@ -17,6 +17,9 @@ mod flexibility_tests;
 mod fs_ops_tests;
 mod fs_util;
 mod inbox;
+mod incorporation;
+#[cfg(test)]
+mod incorporation_tests;
 mod index_sync;
 mod models;
 #[cfg(test)]
@@ -75,6 +78,8 @@ pub fn run() {
             commands::documents::create_document,
             commands::documents::update_document,
             commands::documents::attach_file_to_version,
+            commands::incorporation_cmd::preview_document_incorporation,
+            commands::incorporation_cmd::apply_document_incorporation,
             commands::documents::list_document_versions,
             commands::documents::list_version_files,
             commands::documents::create_document_version,

@@ -54,6 +54,10 @@ import type {
   BulkRegisterResult,
   UpdatePlanItemInput,
   OrganizerPlanItem,
+  IncorporationPreviewInput,
+  IncorporationPreview,
+  IncorporationApplyInput,
+  IncorporationApplyResult,
 } from "./types";
 
 export const api = {
@@ -224,6 +228,10 @@ export const api = {
     invoke<DocumentRow>("update_document", { input }),
   attachFileToVersion: (input: AttachFileInput) =>
     invoke<DocumentFileRow>("attach_file_to_version", { input }),
+  previewDocumentIncorporation: (input: IncorporationPreviewInput) =>
+    invoke<IncorporationPreview>("preview_document_incorporation", { input }),
+  applyDocumentIncorporation: (input: IncorporationApplyInput) =>
+    invoke<IncorporationApplyResult>("apply_document_incorporation", { input }),
   listDocumentVersions: (documentId: string) =>
     invoke<DocumentVersionRow[]>("list_document_versions", { documentId }),
   listVersionFiles: (versionId: string) =>

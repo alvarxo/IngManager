@@ -394,6 +394,101 @@ export interface AttachFileInput {
   absolute_path: string;
   format_label?: string | null;
   revision_id?: string | null;
+  /** Default false: link working file. True: copy into snapshots. */
+  as_snapshot?: boolean | null;
+  file_role?: string | null;
+}
+
+export type IncorporationMode =
+  | "associate_existing"
+  | "register_new"
+  | "physical_only";
+
+export type PhysicalOp = "none" | "copy" | "move";
+
+export interface IncorporationFileProposal {
+  absolute_path: string;
+  file_name: string;
+  extension: string | null;
+  size_bytes: number | null;
+  role: string;
+  already_linked_document_id: string | null;
+  already_linked_code: string | null;
+  under_project: boolean;
+  relative_path: string | null;
+}
+
+export interface ExistingDocMatch {
+  document_id: string;
+  business_code: string | null;
+  title: string;
+  file_count: number;
+  score: number;
+}
+
+export interface IncorporationGroupProposal {
+  group_key: string;
+  title: string;
+  suggested_mode: IncorporationMode;
+  mode: IncorporationMode;
+  files: IncorporationFileProposal[];
+  suggested_document_id: string | null;
+  document_id: string | null;
+  matches: ExistingDocMatch[];
+  notes: string | null;
+}
+
+export interface IncorporationPreview {
+  project_id: string;
+  category_key: string;
+  dest_absolute_path: string | null;
+  physical_op: PhysicalOp;
+  groups: IncorporationGroupProposal[];
+  warning: string | null;
+}
+
+export interface IncorporationPreviewInput {
+  project_id: string;
+  category_key: string;
+  absolute_paths: string[];
+  dest_absolute_path?: string | null;
+  physical_op?: PhysicalOp | null;
+}
+
+export interface IncorporationGroupDecision {
+  group_key: string;
+  mode: IncorporationMode;
+  document_id?: string | null;
+  title?: string | null;
+  assign_code?: boolean | null;
+}
+
+export interface IncorporationApplyInput {
+  project_id: string;
+  category_key: string;
+  absolute_paths: string[];
+  dest_absolute_path?: string | null;
+  physical_op?: PhysicalOp | null;
+  decisions: IncorporationGroupDecision[];
+}
+
+export interface IncorporationGroupResult {
+  group_key: string;
+  mode: IncorporationMode;
+  document_id: string | null;
+  business_code: string | null;
+  linked_files: number;
+  skipped_files: number;
+  physical_destinations: string[];
+  message: string | null;
+}
+
+export interface IncorporationApplyResult {
+  groups: IncorporationGroupResult[];
+  created_documents: number;
+  associated_documents: number;
+  physical_only: number;
+  warning: string | null;
 }
 
 export interface TransmissionRow {

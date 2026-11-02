@@ -8,6 +8,7 @@ pub mod files;
 pub mod import_wizard;
 pub mod inbox_cmd;
 pub mod indexing;
+pub mod incorporation_cmd;
 pub mod organizer;
 pub mod projects;
 pub mod search;

@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::doc_codes::{next_document_code, type_code_for_category, version_label};
 use crate::error::{AppError, AppResult};
-use crate::path_security::{ensure_under_root, join_under_root};
+use crate::path_security::join_under_root;
 use crate::state::AppState;
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -140,20 +140,45 @@ pub struct AttachFileInput {
     pub absolute_path: String,
     pub format_label: Option<String>,
     pub revision_id: Option<String>,
+    /// When true, copy into `.ingmanager/snapshots` (historical freeze).
+    /// Default **false**: link the working file in place (no copy).
+    pub as_snapshot: Option<bool>,
+    pub file_role: Option<String>,
 }
 
-async fn require_root(state: &AppState) -> AppResult<PathBuf> {
-    crate::project_paths::require_primary_root_path(&state.pool).await
+async fn loc_for_version(
+    state: &AppState,
+    version_id: &str,
+) -> AppResult<crate::project_paths::ProjectLocation> {
+    let project_id: (String,) = sqlx::query_as(
+        "SELECT d.project_id
+         FROM document_versions v
+         JOIN documents d ON d.id = v.document_id
+         WHERE v.id = ?",
+    )
+    .bind(version_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| AppError::msg("Versión no encontrada"))?;
+    crate::project_paths::resolve_project_location(&state.pool, &project_id.0).await
+}
+
+async fn loc_for_document(
+    state: &AppState,
+    document_id: &str,
+) -> AppResult<crate::project_paths::ProjectLocation> {
+    let project_id: (String,) =
+        sqlx::query_as("SELECT project_id FROM documents WHERE id = ?")
+            .bind(document_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .ok_or_else(|| AppError::msg("Documento no encontrado"))?;
+    crate::project_paths::resolve_project_location(&state.pool, &project_id.0).await
 }
 
 async fn project_business_prefix(state: &AppState, project_id: &str) -> AppResult<String> {
     let loc = crate::project_paths::resolve_project_location(&state.pool, project_id).await?;
     Ok(loc.business_code_prefix)
-}
-
-async fn root_for_project(state: &AppState, project_id: &str) -> AppResult<PathBuf> {
-    let loc = crate::project_paths::resolve_project_location(&state.pool, project_id).await?;
-    Ok(loc.root_path)
 }
 
 fn fingerprint(path: &Path) -> AppResult<String> {
@@ -172,21 +197,6 @@ fn fingerprint(path: &Path) -> AppResult<String> {
 fn to_rfc3339(time: SystemTime) -> Option<String> {
     let dt: DateTime<Utc> = time.into();
     Some(dt.to_rfc3339())
-}
-
-fn rel_from_root(root: &Path, abs: &Path) -> AppResult<String> {
-    Ok(abs
-        .strip_prefix(root)
-        .map_err(|_| AppError::msg("Ruta fuera de la raíz"))?
-        .to_string_lossy()
-        .replace('\\', "/"))
-}
-
-fn snapshots_dir(root: &Path, document_id: &str, version_number: i64) -> PathBuf {
-    root.join(".ingmanager")
-        .join("snapshots")
-        .join(document_id)
-        .join(format!("v{version_number:02}"))
 }
 
 fn temp_open_dir(root: &Path) -> PathBuf {
@@ -232,11 +242,14 @@ async fn fetch_document(state: &AppState, id: &str) -> AppResult<DocumentRow> {
 
 async fn enrich_change_flags(
     state: &AppState,
-    root: &Path,
     mut docs: Vec<DocumentRow>,
 ) -> AppResult<Vec<DocumentRow>> {
     for doc in &mut docs {
         if let Some(vid) = &doc.current_version_id {
+            let loc = match loc_for_document(state, &doc.id).await {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
             let files: Vec<(String, Option<String>)> = sqlx::query_as(
                 "SELECT relative_path, content_hash FROM document_files
                  WHERE document_version_id = ? AND is_available = 1",
@@ -246,7 +259,13 @@ async fn enrich_change_flags(
             .await?;
             let mut changed = false;
             for (rel, hash) in files {
-                let abs = root.join(&rel);
+                let abs = match crate::path_security::join_under_root(&loc.root_path, &rel) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        changed = true;
+                        break;
+                    }
+                };
                 if !abs.exists() {
                     changed = true;
                     break;
@@ -272,7 +291,6 @@ pub async fn list_documents(
     current_only: Option<bool>,
 ) -> AppResult<Vec<DocumentRow>> {
     let _current_only = current_only.unwrap_or(true); // listing is always logical docs; versions filtered elsewhere
-    let root = require_root(&state).await?;
 
     let docs = if let Some(key) = category_key {
         sqlx::query_as::<_, DocumentRow>(
@@ -323,14 +341,13 @@ pub async fn list_documents(
         .await?
     };
 
-    enrich_change_flags(&state, &root, docs).await
+    enrich_change_flags(&state, docs).await
 }
 
 #[tauri::command]
 pub async fn get_document(state: State<'_, AppState>, id: String) -> AppResult<DocumentRow> {
-    let root = require_root(&state).await?;
     let doc = fetch_document(&state, &id).await?;
-    Ok(enrich_change_flags(&state, &root, vec![doc])
+    Ok(enrich_change_flags(&state, vec![doc])
         .await?
         .into_iter()
         .next()
@@ -367,7 +384,6 @@ pub async fn create_document(
         return Err(AppError::msg("El título es obligatorio"));
     }
 
-    let root = root_for_project(&state, &input.project_id).await?;
     let prefix = project_business_prefix(&state, &input.project_id).await?;
 
     let category: (String, String) = sqlx::query_as(
@@ -459,12 +475,12 @@ pub async fn create_document(
     if let Some(src) = input.source_absolute_path {
         let _ = attach_file_inner(
             &state,
-            &root,
             &version_id,
             &src,
             None,
             None,
-            true,
+            false, // link working file
+            None,
         )
         .await?;
     }
@@ -547,94 +563,7 @@ pub async fn update_document(
     get_document(state, input.id).await
 }
 
-async fn attach_file_inner(
-    state: &AppState,
-    root: &Path,
-    version_id: &str,
-    absolute_path: &str,
-    format_label: Option<String>,
-    revision_id: Option<String>,
-    take_snapshot: bool,
-) -> AppResult<DocumentFileRow> {
-    let src = ensure_under_root(root, Path::new(absolute_path))?;
-    if !src.is_file() {
-        return Err(AppError::msg("La ruta no es un archivo"));
-    }
-
-    let version: (String, i64, String) = sqlx::query_as(
-        "SELECT document_id, version_number, COALESCE(snapshot_relative_path, '')
-         FROM document_versions WHERE id = ?",
-    )
-    .bind(version_id)
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or_else(|| AppError::msg("Versión no encontrada"))?;
-
-    let (document_id, version_number, existing_snap) = version;
-    let file_name = src
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "file".into());
-    let extension = src
-        .extension()
-        .map(|e| e.to_string_lossy().to_ascii_lowercase());
-    let meta = fs::metadata(&src)?;
-    let modified = meta.modified().ok().and_then(to_rfc3339);
-    let fp = fingerprint(&src)?;
-
-    let stored_rel = if take_snapshot {
-        let snap_dir = snapshots_dir(root, &document_id, version_number);
-        fs::create_dir_all(&snap_dir)?;
-        let dest = snap_dir.join(&file_name);
-        let dest = if dest.exists() {
-            crate::fs_util::unique_destination(&snap_dir, &file_name)
-        } else {
-            dest
-        };
-        fs::copy(&src, &dest)?;
-        let rel = rel_from_root(root, &dest)?;
-        let snap_rel = rel_from_root(root, &snap_dir)?;
-        sqlx::query(
-            "UPDATE document_versions SET
-                snapshot_relative_path = ?,
-                registered_fingerprint = ?,
-                source_relative_path = ?,
-                is_snapshot = 1
-             WHERE id = ?",
-        )
-        .bind(&snap_rel)
-        .bind(&fp)
-        .bind(rel_from_root(root, &src)?)
-        .bind(version_id)
-        .execute(&state.pool)
-        .await?;
-        let _ = existing_snap;
-        rel
-    } else {
-        rel_from_root(root, &src)?
-    };
-
-    let id = Uuid::new_v4().to_string();
-    sqlx::query(
-        "INSERT INTO document_files (
-            id, document_version_id, relative_path, file_name, extension,
-            size_bytes, modified_at, content_hash, is_available, format_label,
-            revision_id, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, datetime('now'))",
-    )
-    .bind(&id)
-    .bind(version_id)
-    .bind(&stored_rel)
-    .bind(&file_name)
-    .bind(&extension)
-    .bind(meta.len() as i64)
-    .bind(&modified)
-    .bind(&fp)
-    .bind(&format_label)
-    .bind(&revision_id)
-    .execute(&state.pool)
-    .await?;
-
+async fn fetch_document_file(state: &AppState, id: &str) -> AppResult<DocumentFileRow> {
     sqlx::query_as::<_, DocumentFileRow>(
         "SELECT id, document_version_id, relative_path, file_name, extension,
                 size_bytes, modified_at, content_hash, is_available, format_label,
@@ -647,20 +576,73 @@ async fn attach_file_inner(
     .map_err(AppError::from)
 }
 
+/// Attach a file to a version.
+/// Default: **link** the working path under the project's authorized root.
+/// Set `take_snapshot` to copy into `.ingmanager/snapshots` (issued revisions / freeze).
+async fn attach_file_inner(
+    state: &AppState,
+    version_id: &str,
+    absolute_path: &str,
+    format_label: Option<String>,
+    revision_id: Option<String>,
+    take_snapshot: bool,
+    file_role: Option<String>,
+) -> AppResult<DocumentFileRow> {
+    let loc = loc_for_version(state, version_id).await?;
+    let version: (String, i64) = sqlx::query_as(
+        "SELECT document_id, version_number FROM document_versions WHERE id = ?",
+    )
+    .bind(version_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| AppError::msg("Versión no encontrada"))?;
+    let (document_id, version_number) = version;
+
+    let id = if take_snapshot {
+        crate::incorporation::snapshot_file_to_version(
+            &state.pool,
+            &loc,
+            &document_id,
+            version_id,
+            version_number,
+            Path::new(absolute_path),
+            format_label.as_deref(),
+            file_role.as_deref(),
+            revision_id.as_deref(),
+        )
+        .await?
+    } else {
+        let (id, _) = crate::incorporation::link_working_file(
+            &state.pool,
+            &loc,
+            version_id,
+            Path::new(absolute_path),
+            format_label.as_deref(),
+            file_role.as_deref(),
+            revision_id.as_deref(),
+        )
+        .await?;
+        id
+    };
+    fetch_document_file(state, &id).await
+}
+
 #[tauri::command]
 pub async fn attach_file_to_version(
     state: State<'_, AppState>,
     input: AttachFileInput,
 ) -> AppResult<DocumentFileRow> {
-    let root = require_root(&state).await?;
+    // Default: link working file. Snapshots only when explicitly requested
+    // (or when attaching formats to an issued revision).
+    let take_snapshot = input.as_snapshot.unwrap_or(input.revision_id.is_some());
     attach_file_inner(
         &state,
-        &root,
         &input.document_version_id,
         &input.absolute_path,
         input.format_label,
         input.revision_id,
-        true,
+        take_snapshot,
+        input.file_role,
     )
     .await
 }
@@ -725,7 +707,7 @@ pub async fn create_document_version(
     state: State<'_, AppState>,
     input: CreateVersionInput,
 ) -> AppResult<DocumentVersionRow> {
-    let root = require_root(&state).await?;
+    let loc = loc_for_document(&state, &input.document_id).await?;
     let doc = fetch_document(&state, &input.document_id).await?;
 
     let max_n: (i64,) = sqlx::query_as(
@@ -759,24 +741,34 @@ pub async fn create_document_version(
     .await?;
 
     if let Some(src) = input.source_absolute_path {
-        let _ = attach_file_inner(&state, &root, &version_id, &src, None, None, true).await?;
+        // New working version links the source file (no forced snapshot).
+        let _ = attach_file_inner(
+            &state,
+            &version_id,
+            &src,
+            None,
+            None,
+            false,
+            None,
+        )
+        .await?;
     } else if input.from_current.unwrap_or(false) {
         if let Some(cur) = doc.current_version_id {
-            // copy files from previous current (before update we already pointed new — use listed files of old)
-            // We updated current already; fetch files that were on old version `cur` if cur != version_id
             if cur != version_id {
                 let files = list_version_files(state.clone(), cur).await?;
                 for f in files {
-                    let abs = join_under_root(&root, &f.relative_path)?;
+                    let abs = join_under_root(&loc.root_path, &f.relative_path)?;
                     if abs.is_file() {
+                        // Preserve working links; snapshots stay as snapshot copies.
+                        let is_snap_path = f.relative_path.contains(".ingmanager/snapshots");
                         let _ = attach_file_inner(
                             &state,
-                            &root,
                             &version_id,
                             &abs.display().to_string(),
                             f.format_label,
                             None,
-                            true,
+                            is_snap_path,
+                            None,
                         )
                         .await?;
                     }
@@ -800,7 +792,7 @@ pub async fn restore_document_version(
     version_id: String,
     notes: Option<String>,
 ) -> AppResult<DocumentVersionRow> {
-    let root = require_root(&state).await?;
+    let loc = loc_for_document(&state, &document_id).await?;
     let source_files = list_version_files(state.clone(), version_id.clone()).await?;
     if source_files.is_empty() {
         return Err(AppError::msg(
@@ -840,16 +832,18 @@ pub async fn restore_document_version(
     .await?;
 
     for f in source_files {
-        let abs = join_under_root(&root, &f.relative_path)?;
+        let abs = join_under_root(&loc.root_path, &f.relative_path)?;
         if abs.is_file() {
+            // Restored current version links working copies when possible.
+            let is_snap_path = f.relative_path.contains(".ingmanager/snapshots");
             let _ = attach_file_inner(
                 &state,
-                &root,
                 &new_id,
                 &abs.display().to_string(),
                 f.format_label,
                 None,
-                true,
+                is_snap_path,
+                None,
             )
             .await?;
         }
@@ -868,11 +862,11 @@ pub async fn open_document_file(
     file_id: String,
     use_temp_copy: Option<bool>,
 ) -> AppResult<String> {
-    let root = require_root(&state).await?;
-    let row: (String, String, i64) = sqlx::query_as(
-        "SELECT f.relative_path, f.file_name, COALESCE(v.is_snapshot, 0)
+    let row: (String, String, i64, String) = sqlx::query_as(
+        "SELECT f.relative_path, f.file_name, COALESCE(v.is_snapshot, 0), d.project_id
          FROM document_files f
          JOIN document_versions v ON v.id = f.document_version_id
+         JOIN documents d ON d.id = v.document_id
          WHERE f.id = ?",
     )
     .bind(&file_id)
@@ -880,15 +874,16 @@ pub async fn open_document_file(
     .await?
     .ok_or_else(|| AppError::msg("Archivo de documento no encontrado"))?;
 
-    let (rel, file_name, is_snapshot) = row;
-    let src = join_under_root(&root, &rel)?;
+    let (rel, file_name, is_snapshot, project_id) = row;
+    let loc = crate::project_paths::resolve_project_location(&state.pool, &project_id).await?;
+    let src = join_under_root(&loc.root_path, &rel)?;
     if !src.is_file() {
         return Err(AppError::msg("El archivo físico no está disponible"));
     }
 
     let force_temp = use_temp_copy.unwrap_or(is_snapshot == 1);
     let open_path = if force_temp {
-        let tmp = temp_open_dir(&root).join(Uuid::new_v4().to_string());
+        let tmp = temp_open_dir(&loc.root_path).join(Uuid::new_v4().to_string());
         fs::create_dir_all(&tmp)?;
         let dest = tmp.join(&file_name);
         fs::copy(&src, &dest)?;
@@ -924,7 +919,6 @@ pub async fn create_revision(
     state: State<'_, AppState>,
     input: CreateRevisionInput,
 ) -> AppResult<RevisionRow> {
-    let root = require_root(&state).await?;
     let code = input.revision_code.trim().to_string();
     if code.is_empty() {
         return Err(AppError::msg("El código de revisión es obligatorio"));
@@ -946,7 +940,8 @@ pub async fn create_revision(
     .execute(&state.pool)
     .await?;
 
-    // Attach multiple formats to the linked version (or current) without duplicating document rows
+    // Issued revision formats are snapshotted (historical freeze). Working
+    // editable files on the version remain linked separately.
     if let Some(paths) = input.file_paths {
         let version_id = if let Some(v) = input.document_version_id.clone() {
             v
@@ -960,12 +955,12 @@ pub async fn create_revision(
             let label = labels.get(i).cloned();
             let _ = attach_file_inner(
                 &state,
-                &root,
                 &version_id,
                 path,
                 label,
                 Some(id.clone()),
-                true,
+                true, // snapshot issued formats
+                Some("issued_revision".into()),
             )
             .await?;
         }
@@ -1185,7 +1180,6 @@ pub async fn list_favorite_documents(
     state: State<'_, AppState>,
     project_id: Option<String>,
 ) -> AppResult<Vec<DocumentRow>> {
-    let root = require_root(&state).await?;
     let docs = if let Some(pid) = project_id {
         sqlx::query_as::<_, DocumentRow>(
             "SELECT
@@ -1234,7 +1228,7 @@ pub async fn list_favorite_documents(
         .fetch_all(&state.pool)
         .await?
     };
-    enrich_change_flags(&state, &root, docs).await
+    enrich_change_flags(&state, docs).await
 }
 
 #[tauri::command]

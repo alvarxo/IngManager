@@ -39,7 +39,7 @@ import { useNativeFileDrop } from "@/hooks/useNativeFileDrop";
 import { useClipboardStore } from "@/stores/clipboard-store";
 import { useUiStore } from "@/stores/ui-store";
 import { Button } from "./ui/button";
-import { ExternalDropDialog } from "./ExternalDropDialog";
+import { IncorporationDialog } from "./IncorporationDialog";
 
 interface Props {
   projectId: string;
@@ -74,9 +74,10 @@ export function FileManager({ projectId, categoryKey }: Props) {
   const [dragOver, setDragOver] = useState(false);
   const [osDragOver, setOsDragOver] = useState(false);
   const [showAuxiliaries, setShowAuxiliaries] = useState(false);
-  const [externalDrop, setExternalDrop] = useState<{
+  const [incorporate, setIncorporate] = useState<{
     paths: string[];
-    preferMove: boolean;
+    alreadyInProject: boolean;
+    preferMove?: boolean;
   } | null>(null);
   const tableRef = useRef<HTMLDivElement>(null);
   const dropZoneRef = useRef<HTMLDivElement>(null);
@@ -387,11 +388,15 @@ export function FileManager({ projectId, categoryKey }: Props) {
   }
 
   useNativeFileDrop(dropZoneRef, {
-    enabled: !!currentPath && !externalDrop,
+    enabled: !!currentPath && !incorporate,
     onDrop: () => undefined,
     onDropWithModifiers: (paths, preferMove) => {
       if (!currentPath || paths.length === 0) return;
-      setExternalDrop({ paths, preferMove });
+      setIncorporate({
+        paths,
+        alreadyInProject: false,
+        preferMove,
+      });
     },
     onActiveChange: setOsDragOver,
   });
@@ -458,6 +463,26 @@ export function FileManager({ projectId, categoryKey }: Props) {
         </Button>
         <Button variant="secondary" size="sm" onClick={importFiles}>
           <FilePlus2 size={14} /> Importar
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={
+            selected.filter((p) =>
+              entries.some((e) => e.absolute_path === p && !e.is_directory),
+            ).length === 0
+          }
+          onClick={() => {
+            const paths = selected.filter((p) =>
+              entries.some((e) => e.absolute_path === p && !e.is_directory),
+            );
+            if (paths.length) {
+              setIncorporate({ paths, alreadyInProject: true });
+            }
+          }}
+          title="Registrar o asociar archivos ya en el proyecto (sin volver a arrastrar)"
+        >
+          Incorporar
         </Button>
         <Button variant="ghost" size="icon" onClick={copySelected} title="Copiar">
           <Copy size={14} />
@@ -616,24 +641,30 @@ export function FileManager({ projectId, categoryKey }: Props) {
         )}
       </div>
 
-      {externalDrop && currentPath && (
-        <ExternalDropDialog
-          destDir={currentPath}
-          sourcePaths={externalDrop.paths}
-          preferMove={externalDrop.preferMove}
-          onClose={() => setExternalDrop(null)}
+      {incorporate && currentPath && (
+        <IncorporationDialog
+          projectId={projectId}
+          categoryKey={categoryKey}
+          absolutePaths={incorporate.paths}
+          destAbsolutePath={
+            incorporate.alreadyInProject ? null : currentPath
+          }
+          preferMove={incorporate.preferMove}
+          alreadyInProject={incorporate.alreadyInProject}
+          onClose={() => setIncorporate(null)}
           onCompleted={(message, warning) => {
-            setExternalDrop(null);
+            setIncorporate(null);
             setStatus(message);
             setWarning(warning);
             void refresh();
+            void qc.invalidateQueries({ queryKey: ["documents", projectId] });
           }}
         />
       )}
 
       {contextMenu && (
         <div
-          className="fixed z-50 min-w-[180px] border border-border bg-panel py-1 shadow-lg"
+          className="fixed z-50 min-w-[200px] border border-border bg-panel py-1 shadow-lg"
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onClick={(e) => e.stopPropagation()}
         >
@@ -642,6 +673,31 @@ export function FileManager({ projectId, categoryKey }: Props) {
             disabled={!contextMenu.entry}
             onClick={() => {
               if (contextMenu.entry) void handleOpen(contextMenu.entry);
+              setContextMenu(null);
+            }}
+          />
+          <MenuItem
+            label="Incorporar…"
+            disabled={
+              selected.filter((p) =>
+                entries.some((e) => e.absolute_path === p && !e.is_directory),
+              ).length === 0 &&
+              !(contextMenu.entry && !contextMenu.entry.is_directory)
+            }
+            onClick={() => {
+              const paths =
+                selected.length > 0
+                  ? selected.filter((p) =>
+                      entries.some(
+                        (e) => e.absolute_path === p && !e.is_directory,
+                      ),
+                    )
+                  : contextMenu.entry && !contextMenu.entry.is_directory
+                    ? [contextMenu.entry.absolute_path]
+                    : [];
+              if (paths.length) {
+                setIncorporate({ paths, alreadyInProject: true });
+              }
               setContextMenu(null);
             }}
           />

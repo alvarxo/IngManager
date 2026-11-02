@@ -154,16 +154,30 @@ pub async fn create_project(
     }
 
     sqlx::query(
-        "INSERT INTO audit_log (id, entity_type, entity_id, action, detail)
-         VALUES (?, 'project', ?, 'create', ?)",
+        "INSERT INTO audit_log (id, entity_type, entity_id, action, detail, project_id)
+         VALUES (?, 'project', ?, 'create', ?, ?)",
     )
     .bind(Uuid::new_v4().to_string())
     .bind(&id)
     .bind(format!("Created project {code}"))
+    .bind(&id)
     .execute(&mut *tx)
     .await?;
 
     tx.commit().await?;
+
+    crate::search_index::upsert_fts(
+        &state.pool,
+        "project",
+        &id,
+        Some(&id),
+        &name,
+        Some(&code),
+        description.as_deref(),
+        None,
+    )
+    .await
+    .ok();
 
     get_project(state, id).await
 }
@@ -217,6 +231,19 @@ pub async fn update_project(
     .bind(&input.id)
     .execute(&state.pool)
     .await?;
+
+    crate::search_index::upsert_fts(
+        &state.pool,
+        "project",
+        &input.id,
+        Some(&input.id),
+        &name,
+        Some(&existing.code),
+        description.as_deref(),
+        None,
+    )
+    .await
+    .ok();
 
     get_project(state, input.id).await
 }

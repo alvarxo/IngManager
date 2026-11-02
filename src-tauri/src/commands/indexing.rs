@@ -261,12 +261,27 @@ async fn run_index(app: &AppHandle, pool: &sqlx::SqlitePool, root: &Path) -> App
     let _ = app.emit(
         "index-progress",
         IndexProgress {
+            phase: "fts".into(),
+            scanned,
+            total_hint: Some(scanned),
+            current_path: None,
+            done: false,
+            message: Some("Reconstruyendo índice de búsqueda…".into()),
+        },
+    );
+    let fts_count = crate::search_index::rebuild_all(pool).await.unwrap_or(0);
+
+    let _ = app.emit(
+        "index-progress",
+        IndexProgress {
             phase: "done".into(),
             scanned,
             total_hint: Some(scanned),
             current_path: None,
             done: true,
-            message: Some(format!("Indexación completa: {scanned} entradas")),
+            message: Some(format!(
+                "Indexación completa: {scanned} entradas · FTS {fts_count} filas"
+            )),
         },
     );
 

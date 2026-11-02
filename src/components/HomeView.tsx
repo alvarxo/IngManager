@@ -5,6 +5,8 @@ import { useUiStore } from "@/stores/ui-store";
 
 export function HomeView() {
   const setView = useUiStore((s) => s.setView);
+  const setSelectedDocumentId = useUiStore((s) => s.setSelectedDocumentId);
+  const setInspectorTab = useUiStore((s) => s.setInspectorTab);
 
   const recent = useQuery({
     queryKey: ["recent-projects"],
@@ -13,6 +15,10 @@ export function HomeView() {
   const favorites = useQuery({
     queryKey: ["favorite-projects"],
     queryFn: () => api.listFavoriteProjects(),
+  });
+  const favoriteDocs = useQuery({
+    queryKey: ["favorite-documents", "home"],
+    queryFn: () => api.listFavoriteDocuments(null),
   });
 
   return (
@@ -61,14 +67,13 @@ export function HomeView() {
         )}
       </section>
 
-      <section>
+      <section className="mb-8">
         <h2 className="mb-2 flex items-center gap-2 text-[12px] font-semibold uppercase tracking-wide text-muted">
-          <Star size={14} /> Favoritos
+          <Star size={14} /> Proyectos favoritos
         </h2>
         {(favorites.data?.length ?? 0) === 0 ? (
           <p className="text-[12.5px] text-muted">
-            Marque proyectos como favoritos desde el inspector (cuando estén
-            disponibles).
+            Marque proyectos como favoritos desde el inspector.
           </p>
         ) : (
           <ul className="max-w-3xl space-y-1">
@@ -84,6 +89,43 @@ export function HomeView() {
                 >
                   <span className="font-mono text-accent">{p.code}</span>
                   <span>{p.name}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section>
+        <h2 className="mb-2 flex items-center gap-2 text-[12px] font-semibold uppercase tracking-wide text-muted">
+          <Star size={14} /> Documentos favoritos
+        </h2>
+        {(favoriteDocs.data?.length ?? 0) === 0 ? (
+          <p className="text-[12.5px] text-muted">
+            Marque documentos desde el inspector (estrella en Detalle).
+          </p>
+        ) : (
+          <ul className="max-w-3xl space-y-1">
+            {favoriteDocs.data?.map((d) => (
+              <li key={d.id}>
+                <button
+                  type="button"
+                  className="flex h-[40px] w-full items-center gap-3 rounded-[var(--radius-sm)] px-2 hover:bg-elevated"
+                  onClick={async () => {
+                    await api.openProject(d.project_id);
+                    setSelectedDocumentId(d.id);
+                    setInspectorTab("doc-detail");
+                    setView({
+                      kind: "project",
+                      projectId: d.project_id,
+                      categoryKey: d.category_key ?? undefined,
+                    });
+                  }}
+                >
+                  <span className="font-mono text-accent">
+                    {d.business_code ?? "—"}
+                  </span>
+                  <span className="truncate">{d.title}</span>
                 </button>
               </li>
             ))}

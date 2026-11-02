@@ -218,6 +218,85 @@ export interface RelationshipRow {
   source_document_id: string;
   target_document_id: string;
   relation_type: string;
+  notes: string | null;
+  source_title: string | null;
+  source_code: string | null;
+  target_title: string | null;
+  target_code: string | null;
+  source_version_label: string | null;
+  target_version_label: string | null;
+}
+
+export interface CreateRelationshipInput {
+  source_document_id: string;
+  target_document_id: string;
+  relation_type: string;
+  notes?: string | null;
+}
+
+export interface SearchHit {
+  entity_type: string;
+  entity_id: string;
+  project_id: string;
+  title: string;
+  code: string;
+  body: string;
+  file_name: string;
+  rank: number;
+}
+
+export interface AuditEntry {
+  id: string;
+  entity_type: string | null;
+  entity_id: string | null;
+  action: string;
+  detail: string | null;
+  created_at: string;
+  project_id: string | null;
+}
+
+export interface BackupResult {
+  backup_dir: string;
+  db_snapshot: string;
+  manifest_path: string;
+  zip_path: string | null;
+  project_count: number;
+}
+
+export interface DetectedFolder {
+  absolute_path: string;
+  name: string;
+  suggested_code: string | null;
+  suggested_name: string;
+  matched_standard_folders: string[];
+  looks_like_project: boolean;
+  conflict_with_existing: boolean;
+}
+
+export interface ImportPreview {
+  source_path: string;
+  target_relative_path: string;
+  target_absolute_path: string;
+  will_overwrite: boolean;
+  folders_to_create: string[];
+  file_count_hint: number;
+}
+
+export interface ImportProjectInput {
+  source_path: string;
+  code: string;
+  name: string;
+  description?: string | null;
+  client_name?: string | null;
+  confirm_overwrite?: boolean | null;
+  copy_files?: boolean | null;
+}
+
+export interface ImportProjectResult {
+  project_id: string;
+  code: string;
+  target_path: string;
+  copied: boolean;
 }
 
 export interface CreateVersionInput {

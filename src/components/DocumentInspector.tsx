@@ -1,22 +1,38 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
+import { Star } from "lucide-react";
 import { api } from "@/lib/api";
 import { formatBytes } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui-store";
 import { Button } from "./ui/button";
 import { cn } from "@/lib/utils";
 
+const RELATION_TYPES = [
+  "relacionado",
+  "deriva_de",
+  "reemplaza",
+  "referencia",
+  "anexo",
+];
+
 export function DocumentInspector() {
   const documentId = useUiStore((s) => s.selectedDocumentId);
   const inspectorTab = useUiStore((s) => s.inspectorTab);
   const setInspectorTab = useUiStore((s) => s.setInspectorTab);
+  const setSelectedDocumentId = useUiStore((s) => s.setSelectedDocumentId);
   const showCurrentVersionOnly = useUiStore((s) => s.showCurrentVersionOnly);
   const qc = useQueryClient();
 
   const doc = useQuery({
     queryKey: ["document", documentId],
     queryFn: () => api.getDocument(documentId!),
+    enabled: !!documentId,
+  });
+
+  const favorite = useQuery({
+    queryKey: ["doc-favorite", documentId],
+    queryFn: () => api.isDocumentFavorite(documentId!),
     enabled: !!documentId,
   });
 
@@ -38,7 +54,18 @@ export function DocumentInspector() {
     enabled: !!documentId && inspectorTab === "doc-related",
   });
 
+  const projectDocs = useQuery({
+    queryKey: ["documents-all", doc.data?.project_id],
+    queryFn: () => api.listDocuments(doc.data!.project_id, null, true),
+    enabled: !!doc.data?.project_id && inspectorTab === "doc-related",
+  });
+
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
+  const [relTarget, setRelTarget] = useState("");
+  const [relType, setRelType] = useState("relacionado");
+  const [relNotes, setRelNotes] = useState("");
+  const [relError, setRelError] = useState<string | null>(null);
+
   const activeVersionId =
     selectedVersionId ??
     versions.data?.find((v) => v.is_current === 1)?.id ??
@@ -58,6 +85,32 @@ export function DocumentInspector() {
       await qc.invalidateQueries({ queryKey: ["document", documentId] });
       await qc.invalidateQueries({ queryKey: ["documents"] });
     },
+  });
+
+  const favMut = useMutation({
+    mutationFn: (value: boolean) =>
+      api.setDocumentFavorite(documentId!, value),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["doc-favorite", documentId] });
+      await qc.invalidateQueries({ queryKey: ["favorite-documents"] });
+    },
+  });
+
+  const createRelMut = useMutation({
+    mutationFn: () =>
+      api.createDocumentRelationship({
+        source_document_id: documentId!,
+        target_document_id: relTarget,
+        relation_type: relType,
+        notes: relNotes || null,
+      }),
+    onSuccess: async () => {
+      setRelTarget("");
+      setRelNotes("");
+      setRelError(null);
+      await qc.invalidateQueries({ queryKey: ["doc-related", documentId] });
+    },
+    onError: (e: Error) => setRelError(String(e)),
   });
 
   if (!documentId) {
@@ -105,8 +158,25 @@ export function DocumentInspector() {
       <div className="min-h-0 flex-1 space-y-3 overflow-auto p-3">
         {inspectorTab === "doc-detail" && (
           <>
-            <div className="font-mono text-[13px] text-accent">
-              {d.business_code ?? "(sin código)"}
+            <div className="flex items-start justify-between gap-2">
+              <div className="font-mono text-[13px] text-accent">
+                {d.business_code ?? "(sin código)"}
+              </div>
+              <Button
+                size="sm"
+                variant="ghost"
+                title={
+                  favorite.data ? "Quitar de favoritos" : "Marcar favorito"
+                }
+                onClick={() => favMut.mutate(!favorite.data)}
+              >
+                <Star
+                  size={14}
+                  className={
+                    favorite.data ? "fill-accent text-accent" : "text-muted"
+                  }
+                />
+              </Button>
             </div>
             <div className="text-[14px] font-medium">{d.title}</div>
             {d.has_unregistered_change === 1 && (
@@ -331,24 +401,119 @@ export function DocumentInspector() {
 
         {inspectorTab === "doc-related" && (
           <>
-            <p className="text-[12px] text-muted">
-              Relaciones entre documentos (stub de lectura). Crear relaciones
-              llegará en fase avanzada.
-            </p>
-            <Button size="sm" disabled title="Pendiente de fase avanzada">
-              Añadir relación
-            </Button>
+            <div className="space-y-2 border border-border bg-elevated p-2">
+              <div className="text-[11px] font-semibold uppercase text-muted">
+                Nueva relación
+              </div>
+              <label className="block text-[12px]">
+                <span className="mb-1 block text-muted">Documento destino</span>
+                <select
+                  className="h-[32px] w-full border border-border bg-panel px-2"
+                  value={relTarget}
+                  onChange={(e) => setRelTarget(e.target.value)}
+                >
+                  <option value="">Seleccionar…</option>
+                  {projectDocs.data
+                    ?.filter((x) => x.id !== documentId)
+                    .map((x) => (
+                      <option key={x.id} value={x.id}>
+                        {x.business_code ?? "—"} · {x.title}
+                      </option>
+                    ))}
+                </select>
+              </label>
+              <label className="block text-[12px]">
+                <span className="mb-1 block text-muted">Tipo</span>
+                <select
+                  className="h-[32px] w-full border border-border bg-panel px-2"
+                  value={relType}
+                  onChange={(e) => setRelType(e.target.value)}
+                >
+                  {RELATION_TYPES.map((t) => (
+                    <option key={t} value={t}>
+                      {t}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="block text-[12px]">
+                <span className="mb-1 block text-muted">Notas</span>
+                <input
+                  className="h-[32px] w-full border border-border bg-panel px-2"
+                  value={relNotes}
+                  onChange={(e) => setRelNotes(e.target.value)}
+                />
+              </label>
+              <Button
+                size="sm"
+                disabled={!relTarget || createRelMut.isPending}
+                onClick={() => createRelMut.mutate()}
+              >
+                Añadir relación
+              </Button>
+              {relError && (
+                <p className="text-[12px] text-error">{relError}</p>
+              )}
+            </div>
+
             {(related.data?.length ?? 0) === 0 && (
               <p className="text-[12px] text-muted">Sin relaciones registradas.</p>
             )}
             <ul className="space-y-1">
-              {related.data?.map((r) => (
-                <li key={r.id} className="text-[12px]">
-                  <span className="font-mono">{r.relation_type}</span> ·{" "}
-                  {r.source_document_id.slice(0, 8)}… →{" "}
-                  {r.target_document_id.slice(0, 8)}…
-                </li>
-              ))}
+              {related.data?.map((r) => {
+                const otherId =
+                  r.source_document_id === documentId
+                    ? r.target_document_id
+                    : r.source_document_id;
+                const otherTitle =
+                  r.source_document_id === documentId
+                    ? r.target_title
+                    : r.source_title;
+                const otherCode =
+                  r.source_document_id === documentId
+                    ? r.target_code
+                    : r.source_code;
+                const otherVer =
+                  r.source_document_id === documentId
+                    ? r.target_version_label
+                    : r.source_version_label;
+                return (
+                  <li
+                    key={r.id}
+                    className="flex items-start justify-between gap-2 border border-border/60 px-2 py-1.5 text-[12px]"
+                  >
+                    <button
+                      type="button"
+                      className="min-w-0 flex-1 text-left hover:text-accent"
+                      onClick={() => {
+                        setSelectedDocumentId(otherId);
+                        setInspectorTab("doc-detail");
+                      }}
+                    >
+                      <div className="font-mono text-accent">{r.relation_type}</div>
+                      <div className="truncate">
+                        {otherCode ?? "—"} · {otherTitle ?? otherId.slice(0, 8)}
+                        {otherVer ? ` · ${otherVer}` : ""}
+                      </div>
+                      {r.notes && (
+                        <div className="text-[11px] text-muted">{r.notes}</div>
+                      )}
+                    </button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={async () => {
+                        await api.deleteDocumentRelationship(r.id);
+                        await qc.invalidateQueries({
+                          queryKey: ["doc-related", documentId],
+                        });
+                      }}
+                    >
+                      Quitar
+                    </Button>
+                  </li>
+                );
+              })}
             </ul>
           </>
         )}

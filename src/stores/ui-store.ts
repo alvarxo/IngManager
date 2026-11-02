@@ -14,7 +14,7 @@ type InspectorTab =
   | "doc-related";
 
 type ProjectContentMode = "documents" | "files";
-type ProjectMainTab = "documents" | "transmissions";
+type ProjectMainTab = "documents" | "transmissions" | "info" | "log";
 
 interface UiState {
   view: View;

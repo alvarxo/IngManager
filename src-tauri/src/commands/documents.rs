@@ -477,6 +477,29 @@ pub async fn create_document(
         .await?;
     }
 
+    crate::audit::log_event(
+        &state.pool,
+        Some(&input.project_id),
+        "document",
+        Some(&doc_id),
+        "create",
+        Some(&title),
+    )
+    .await
+    .ok();
+    crate::search_index::upsert_fts(
+        &state.pool,
+        "document",
+        &doc_id,
+        Some(&input.project_id),
+        &title,
+        business_code.as_deref(),
+        input.notes.as_deref(),
+        None,
+    )
+    .await
+    .ok();
+
     get_document(state, doc_id).await
 }
 
@@ -495,6 +518,11 @@ pub async fn update_document(
     let cat_key = existing.category_key.unwrap_or_default();
     validate_doc_status(&cat_key, &status)?;
 
+    let subcategory = input.subcategory.or(existing.subcategory);
+    let origin = input.origin.or(existing.origin);
+    let received_at = input.received_at.or(existing.received_at);
+    let notes = input.notes.or(existing.notes);
+
     sqlx::query(
         "UPDATE documents SET
             title = ?, status = ?, subcategory = ?, origin = ?, received_at = ?,
@@ -503,13 +531,26 @@ pub async fn update_document(
     )
     .bind(&title)
     .bind(&status)
-    .bind(input.subcategory.or(existing.subcategory))
-    .bind(input.origin.or(existing.origin))
-    .bind(input.received_at.or(existing.received_at))
-    .bind(input.notes.or(existing.notes))
+    .bind(&subcategory)
+    .bind(&origin)
+    .bind(&received_at)
+    .bind(&notes)
     .bind(&input.id)
     .execute(&state.pool)
     .await?;
+
+    crate::search_index::upsert_fts(
+        &state.pool,
+        "document",
+        &input.id,
+        Some(&existing.project_id),
+        &title,
+        existing.business_code.as_deref(),
+        notes.as_deref(),
+        None,
+    )
+    .await
+    .ok();
 
     get_document(state, input.id).await
 }
@@ -1007,6 +1048,21 @@ pub struct RelationshipRow {
     pub source_document_id: String,
     pub target_document_id: String,
     pub relation_type: String,
+    pub notes: Option<String>,
+    pub source_title: Option<String>,
+    pub source_code: Option<String>,
+    pub target_title: Option<String>,
+    pub target_code: Option<String>,
+    pub source_version_label: Option<String>,
+    pub target_version_label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateRelationshipInput {
+    pub source_document_id: String,
+    pub target_document_id: String,
+    pub relation_type: String,
+    pub notes: Option<String>,
 }
 
 #[tauri::command]
@@ -1014,15 +1070,191 @@ pub async fn list_document_relationships(
     state: State<'_, AppState>,
     document_id: String,
 ) -> AppResult<Vec<RelationshipRow>> {
-    // Minimal Phase 3 stub: read-only listing; create UI stays disabled
     sqlx::query_as::<_, RelationshipRow>(
-        "SELECT id, source_document_id, target_document_id, relation_type
-         FROM document_relationships
-         WHERE source_document_id = ? OR target_document_id = ?",
+        "SELECT
+            r.id,
+            r.source_document_id,
+            r.target_document_id,
+            r.relation_type,
+            r.notes,
+            s.title AS source_title,
+            s.business_code AS source_code,
+            t.title AS target_title,
+            t.business_code AS target_code,
+            sv.label AS source_version_label,
+            tv.label AS target_version_label
+         FROM document_relationships r
+         JOIN documents s ON s.id = r.source_document_id
+         JOIN documents t ON t.id = r.target_document_id
+         LEFT JOIN document_versions sv ON sv.id = s.current_version_id
+         LEFT JOIN document_versions tv ON tv.id = t.current_version_id
+         WHERE r.source_document_id = ? OR r.target_document_id = ?
+         ORDER BY r.created_at DESC",
     )
     .bind(&document_id)
     .bind(&document_id)
     .fetch_all(&state.pool)
     .await
     .map_err(AppError::from)
+}
+
+#[tauri::command]
+pub async fn create_document_relationship(
+    state: State<'_, AppState>,
+    input: CreateRelationshipInput,
+) -> AppResult<RelationshipRow> {
+    if input.source_document_id == input.target_document_id {
+        return Err(AppError::msg("No se puede relacionar un documento consigo mismo"));
+    }
+    let rel_type = input.relation_type.trim().to_string();
+    if rel_type.is_empty() {
+        return Err(AppError::msg("Tipo de relación obligatorio"));
+    }
+    let id = Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO document_relationships (id, source_document_id, target_document_id, relation_type, notes, created_at)
+         VALUES (?, ?, ?, ?, ?, datetime('now'))",
+    )
+    .bind(&id)
+    .bind(&input.source_document_id)
+    .bind(&input.target_document_id)
+    .bind(&rel_type)
+    .bind(&input.notes)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| {
+        if e.to_string().contains("UNIQUE") {
+            AppError::msg("La relación ya existe")
+        } else {
+            AppError::from(e)
+        }
+    })?;
+
+    let src = fetch_document(&state, &input.source_document_id).await?;
+    crate::audit::log_event(
+        &state.pool,
+        Some(&src.project_id),
+        "document_relationship",
+        Some(&id),
+        "create",
+        Some(&format!(
+            "{} -> {} ({})",
+            input.source_document_id, input.target_document_id, rel_type
+        )),
+    )
+    .await
+    .ok();
+
+    let rows = list_document_relationships(state, input.source_document_id).await?;
+    rows.into_iter()
+        .find(|r| r.id == id)
+        .ok_or_else(|| AppError::msg("Relación creada no encontrada"))
+}
+
+#[tauri::command]
+pub async fn delete_document_relationship(
+    state: State<'_, AppState>,
+    relationship_id: String,
+) -> AppResult<()> {
+    sqlx::query("DELETE FROM document_relationships WHERE id = ?")
+        .bind(&relationship_id)
+        .execute(&state.pool)
+        .await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_document_favorite(
+    state: State<'_, AppState>,
+    document_id: String,
+    favorite: bool,
+) -> AppResult<()> {
+    if favorite {
+        sqlx::query(
+            "INSERT INTO favorites (id, entity_type, entity_id, created_at)
+             VALUES (?, 'document', ?, datetime('now'))
+             ON CONFLICT(entity_type, entity_id) DO NOTHING",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&document_id)
+        .execute(&state.pool)
+        .await?;
+    } else {
+        sqlx::query("DELETE FROM favorites WHERE entity_type = 'document' AND entity_id = ?")
+            .bind(&document_id)
+            .execute(&state.pool)
+            .await?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn list_favorite_documents(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+) -> AppResult<Vec<DocumentRow>> {
+    let root = require_root(&state).await?;
+    let docs = if let Some(pid) = project_id {
+        sqlx::query_as::<_, DocumentRow>(
+            "SELECT
+                d.id, d.project_id, d.category_id, d.business_code, d.title, d.doc_type,
+                d.current_version_id, d.status, d.subcategory, d.origin, d.received_at,
+                d.notes, d.metadata_json, d.created_at, d.updated_at,
+                c.key AS category_key,
+                v.version_number AS current_version_number,
+                v.label AS current_version_label,
+                COALESCE((
+                    SELECT COUNT(*) FROM document_files f
+                    WHERE f.document_version_id = d.current_version_id AND f.is_available = 1
+                ), 0) AS file_count,
+                0 AS has_unregistered_change
+             FROM favorites fav
+             JOIN documents d ON d.id = fav.entity_id
+             LEFT JOIN categories c ON c.id = d.category_id
+             LEFT JOIN document_versions v ON v.id = d.current_version_id
+             WHERE fav.entity_type = 'document' AND d.project_id = ?
+             ORDER BY fav.created_at DESC",
+        )
+        .bind(pid)
+        .fetch_all(&state.pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, DocumentRow>(
+            "SELECT
+                d.id, d.project_id, d.category_id, d.business_code, d.title, d.doc_type,
+                d.current_version_id, d.status, d.subcategory, d.origin, d.received_at,
+                d.notes, d.metadata_json, d.created_at, d.updated_at,
+                c.key AS category_key,
+                v.version_number AS current_version_number,
+                v.label AS current_version_label,
+                COALESCE((
+                    SELECT COUNT(*) FROM document_files f
+                    WHERE f.document_version_id = d.current_version_id AND f.is_available = 1
+                ), 0) AS file_count,
+                0 AS has_unregistered_change
+             FROM favorites fav
+             JOIN documents d ON d.id = fav.entity_id
+             LEFT JOIN categories c ON c.id = d.category_id
+             LEFT JOIN document_versions v ON v.id = d.current_version_id
+             WHERE fav.entity_type = 'document'
+             ORDER BY fav.created_at DESC",
+        )
+        .fetch_all(&state.pool)
+        .await?
+    };
+    enrich_change_flags(&state, &root, docs).await
+}
+
+#[tauri::command]
+pub async fn is_document_favorite(
+    state: State<'_, AppState>,
+    document_id: String,
+) -> AppResult<bool> {
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT id FROM favorites WHERE entity_type = 'document' AND entity_id = ?",
+    )
+    .bind(document_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    Ok(row.is_some())
 }

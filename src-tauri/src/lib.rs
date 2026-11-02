@@ -1,3 +1,4 @@
+mod audit;
 mod codes;
 mod commands;
 mod db;
@@ -11,6 +12,7 @@ mod fs_util;
 mod index_sync;
 mod models;
 mod path_security;
+mod search_index;
 mod state;
 mod watcher;
 mod zip_safe;
@@ -67,6 +69,20 @@ pub fn run() {
             commands::documents::list_subcategories,
             commands::documents::create_subcategory,
             commands::documents::list_document_relationships,
+            commands::documents::create_document_relationship,
+            commands::documents::delete_document_relationship,
+            commands::documents::set_document_favorite,
+            commands::documents::list_favorite_documents,
+            commands::documents::is_document_favorite,
+            commands::search::global_search,
+            commands::search::rebuild_search_index,
+            commands::audit_cmd::list_project_audit,
+            commands::backup::create_portable_backup,
+            commands::backup::list_backup_candidates,
+            commands::import_wizard::detect_importable_projects,
+            commands::import_wizard::preview_import_project,
+            commands::import_wizard::import_existing_project,
+            commands::import_wizard::propose_import_code,
             commands::transmissions::list_transmissions,
             commands::transmissions::get_transmission,
             commands::transmissions::list_transmission_items,

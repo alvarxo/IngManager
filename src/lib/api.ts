@@ -19,8 +19,16 @@ import type {
   IndexedFile,
   PreviewSentResult,
   Project,
+  AuditEntry,
+  BackupResult,
+  CreateRelationshipInput,
+  DetectedFolder,
+  ImportPreview,
+  ImportProjectInput,
+  ImportProjectResult,
   RelationshipRow,
   RevisionRow,
+  SearchHit,
   SubcategoryRow,
   TransmissionItemRow,
   TransmissionLinkRow,
@@ -199,6 +207,53 @@ export const api = {
     }),
   listDocumentRelationships: (documentId: string) =>
     invoke<RelationshipRow[]>("list_document_relationships", { documentId }),
+  createDocumentRelationship: (input: CreateRelationshipInput) =>
+    invoke<RelationshipRow>("create_document_relationship", { input }),
+  deleteDocumentRelationship: (relationshipId: string) =>
+    invoke<void>("delete_document_relationship", { relationshipId }),
+  setDocumentFavorite: (documentId: string, favorite: boolean) =>
+    invoke<void>("set_document_favorite", { documentId, favorite }),
+  listFavoriteDocuments: (projectId?: string | null) =>
+    invoke<DocumentRow[]>("list_favorite_documents", {
+      projectId: projectId ?? null,
+    }),
+  isDocumentFavorite: (documentId: string) =>
+    invoke<boolean>("is_document_favorite", { documentId }),
+
+  globalSearch: (query: string, limit?: number | null) =>
+    invoke<SearchHit[]>("global_search", {
+      query,
+      limit: limit ?? null,
+    }),
+  rebuildSearchIndex: () => invoke<number>("rebuild_search_index"),
+
+  listProjectAudit: (projectId: string, limit?: number | null) =>
+    invoke<AuditEntry[]>("list_project_audit", {
+      projectId,
+      limit: limit ?? null,
+    }),
+
+  createPortableBackup: (
+    destinationDir: string,
+    includeFiles?: boolean | null,
+    projectIds?: string[] | null,
+  ) =>
+    invoke<BackupResult>("create_portable_backup", {
+      destinationDir,
+      includeFiles: includeFiles ?? null,
+      projectIds: projectIds ?? null,
+    }),
+  listBackupCandidates: (path: string) =>
+    invoke<string[]>("list_backup_candidates", { path }),
+
+  detectImportableProjects: (sourcePath: string) =>
+    invoke<DetectedFolder[]>("detect_importable_projects", { sourcePath }),
+  previewImportProject: (sourcePath: string, code: string) =>
+    invoke<ImportPreview>("preview_import_project", { sourcePath, code }),
+  importExistingProject: (input: ImportProjectInput) =>
+    invoke<ImportProjectResult>("import_existing_project", { input }),
+  proposeImportCode: (preferred?: string | null) =>
+    invoke<string>("propose_import_code", { preferred: preferred ?? null }),
 
   listTransmissions: (projectId: string, direction?: string | null) =>
     invoke<TransmissionRow[]>("list_transmissions", {

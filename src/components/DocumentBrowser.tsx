@@ -149,6 +149,7 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
               {docs.data?.map((d) => (
                 <tr
                   key={d.id}
+                  style={{ contentVisibility: "auto", containIntrinsicSize: "40px" }}
                   className={cn(
                     "h-[40px] cursor-pointer border-b border-border/50",
                     selectedDocumentId === d.id

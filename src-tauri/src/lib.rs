@@ -4,9 +4,14 @@ mod db;
 #[cfg(test)]
 mod db_tests;
 mod error;
+#[cfg(test)]
+mod fs_ops_tests;
+mod fs_util;
+mod index_sync;
 mod models;
 mod path_security;
 mod state;
+mod watcher;
 
 use state::AppState;
 use tauri::Manager;
@@ -44,6 +49,20 @@ pub fn run() {
             commands::files::open_project_folder,
             commands::indexing::start_initial_index,
             commands::indexing::reindex_root,
+            commands::file_manager::list_directory,
+            commands::file_manager::resolve_project_category_path,
+            commands::file_manager::create_folder,
+            commands::file_manager::rename_entry,
+            commands::file_manager::copy_entries,
+            commands::file_manager::move_entries,
+            commands::file_manager::import_files,
+            commands::file_manager::delete_to_trash,
+            commands::file_manager::list_trash,
+            commands::file_manager::restore_trash_item,
+            commands::file_manager::purge_trash_item,
+            commands::file_manager::get_entry_properties,
+            commands::file_manager::open_path,
+            commands::watcher_cmd::start_file_watcher,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

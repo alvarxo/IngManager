@@ -72,3 +72,48 @@ export interface IndexProgress {
   done: boolean;
   message: string | null;
 }
+
+export interface FsEntry {
+  name: string;
+  absolute_path: string;
+  relative_path: string;
+  is_directory: boolean;
+  extension: string | null;
+  size_bytes: number | null;
+  modified_at: string | null;
+  is_available: boolean;
+  is_engineering: boolean;
+  category_key: string | null;
+}
+
+export interface FileOpResult {
+  paths: string[];
+  warning: string | null;
+  message: string | null;
+}
+
+export type ConflictPolicy = "rename" | "overwrite" | "abort";
+
+export interface EntryProperties {
+  name: string;
+  absolute_path: string;
+  relative_path: string;
+  is_directory: boolean;
+  extension: string | null;
+  size_bytes: number | null;
+  modified_at: string | null;
+  created_at: string | null;
+  is_engineering: boolean;
+  readonly: boolean;
+}
+
+export interface TrashItem {
+  id: string;
+  project_id: string | null;
+  original_path: string;
+  trash_path: string;
+  deleted_at: string;
+  purge_after: string | null;
+  name: string | null;
+  is_directory: number | null;
+}

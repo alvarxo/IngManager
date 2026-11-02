@@ -21,20 +21,6 @@ async fn require_root(state: &AppState) -> AppResult<PathBuf> {
     Ok(path)
 }
 
-fn category_key_from_rel(rel: &str) -> Option<&'static str> {
-    let first = rel.split(['/', '\\']).next().unwrap_or("");
-    match first {
-        "01_ANTECEDENTES" => Some("antecedentes"),
-        "02_MODELOS" => Some("modelos"),
-        "03_PLANOS" => Some("planos"),
-        "04_MEMORIAS" => Some("memorias"),
-        "05_ADMINISTRACION" => Some("admin"),
-        "06_TRANSMISIONES" => Some("transmisiones"),
-        "07_OTROS" => Some("otros"),
-        _ => None,
-    }
-}
-
 #[tauri::command]
 pub async fn list_category_files(
     state: State<'_, AppState>,
@@ -130,6 +116,3 @@ pub async fn open_project_folder(
     Ok(())
 }
 
-pub fn infer_category_key(project_relative: &str) -> Option<&'static str> {
-    category_key_from_rel(project_relative)
-}

@@ -12,22 +12,11 @@ use crate::models::IndexProgress;
 use crate::path_security::ensure_under_root;
 use crate::state::AppState;
 
-use super::files::infer_category_key;
+use crate::index_sync::{self, infer_category_key};
 
 fn system_time_to_rfc3339(time: SystemTime) -> Option<String> {
     let dt: DateTime<Utc> = time.into();
     Some(dt.to_rfc3339())
-}
-
-fn should_skip(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower == ".ingmanager"
-        || lower == ".ds_store"
-        || lower == "thumbs.db"
-        || lower.ends_with(".tmp")
-        || lower.ends_with(".bak")
-        || lower.starts_with("~$")
-        || lower.ends_with(".sv$")
 }
 
 #[tauri::command]
@@ -180,7 +169,7 @@ async fn run_index(app: &AppHandle, pool: &sqlx::SqlitePool, root: &Path) -> App
     {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy();
-        if should_skip(&name) {
+        if index_sync::should_skip_name(&name) {
             continue;
         }
 

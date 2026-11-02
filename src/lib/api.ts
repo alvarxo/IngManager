@@ -2,9 +2,14 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AppStatus,
   CategorySummary,
+  ConflictPolicy,
   CreateProjectInput,
+  EntryProperties,
+  FileOpResult,
+  FsEntry,
   IndexedFile,
   Project,
+  TrashItem,
   UpdateProjectInput,
 } from "./types";
 
@@ -40,4 +45,79 @@ export const api = {
 
   startInitialIndex: () => invoke<void>("start_initial_index"),
   reindexRoot: () => invoke<void>("reindex_root"),
+  startFileWatcher: () => invoke<void>("start_file_watcher"),
+
+  listDirectory: (absolutePath: string) =>
+    invoke<FsEntry[]>("list_directory", { absolutePath }),
+  resolveProjectCategoryPath: (
+    projectId: string,
+    categoryKey: string,
+    relativeSubpath?: string | null,
+  ) =>
+    invoke<FsEntry>("resolve_project_category_path", {
+      projectId,
+      categoryKey,
+      relativeSubpath: relativeSubpath ?? null,
+    }),
+  createFolder: (parentPath: string, name: string) =>
+    invoke<FileOpResult>("create_folder", { parentPath, name }),
+  renameEntry: (
+    absolutePath: string,
+    newName: string,
+    acknowledgeEngineering = false,
+  ) =>
+    invoke<FileOpResult>("rename_entry", {
+      absolutePath,
+      newName,
+      acknowledgeEngineering,
+    }),
+  copyEntries: (
+    sources: string[],
+    destDir: string,
+    conflictPolicy: ConflictPolicy = "rename",
+  ) =>
+    invoke<FileOpResult>("copy_entries", {
+      sources,
+      destDir,
+      conflictPolicy,
+    }),
+  moveEntries: (
+    sources: string[],
+    destDir: string,
+    conflictPolicy: ConflictPolicy = "rename",
+    acknowledgeEngineering = false,
+  ) =>
+    invoke<FileOpResult>("move_entries", {
+      sources,
+      destDir,
+      conflictPolicy,
+      acknowledgeEngineering,
+    }),
+  importFiles: (
+    sourcePaths: string[],
+    destDir: string,
+    conflictPolicy: ConflictPolicy = "rename",
+  ) =>
+    invoke<FileOpResult>("import_files", {
+      sourcePaths,
+      destDir,
+      conflictPolicy,
+    }),
+  deleteToTrash: (paths: string[], acknowledgeEngineering = false) =>
+    invoke<FileOpResult>("delete_to_trash", {
+      paths,
+      acknowledgeEngineering,
+    }),
+  listTrash: () => invoke<TrashItem[]>("list_trash"),
+  restoreTrashItem: (
+    trashId: string,
+    conflictPolicy: ConflictPolicy = "rename",
+  ) =>
+    invoke<FileOpResult>("restore_trash_item", { trashId, conflictPolicy }),
+  purgeTrashItem: (trashId: string) =>
+    invoke<void>("purge_trash_item", { trashId }),
+  getEntryProperties: (absolutePath: string) =>
+    invoke<EntryProperties>("get_entry_properties", { absolutePath }),
+  openPath: (absolutePath: string) =>
+    invoke<void>("open_path", { absolutePath }),
 };

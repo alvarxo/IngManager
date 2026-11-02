@@ -1,11 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Star } from "lucide-react";
+import { Star, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
+import { formatBytes } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui-store";
 import { Button } from "./ui/button";
+import { cn } from "@/lib/utils";
 
 export function Inspector() {
   const view = useUiStore((s) => s.view);
+  const selectedPaths = useUiStore((s) => s.selectedPaths);
+  const inspectorTab = useUiStore((s) => s.inspectorTab);
+  const setInspectorTab = useUiStore((s) => s.setInspectorTab);
   const qc = useQueryClient();
 
   const projectId = view.kind === "project" ? view.projectId : null;
@@ -13,6 +18,19 @@ export function Inspector() {
     queryKey: ["project", projectId],
     queryFn: () => api.getProject(projectId!),
     enabled: !!projectId,
+  });
+
+  const selectedPath = selectedPaths[0] ?? null;
+  const props = useQuery({
+    queryKey: ["entry-props", selectedPath],
+    queryFn: () => api.getEntryProperties(selectedPath!),
+    enabled: !!selectedPath && inspectorTab === "file",
+  });
+
+  const trash = useQuery({
+    queryKey: ["trash"],
+    queryFn: () => api.listTrash(),
+    enabled: inspectorTab === "trash",
   });
 
   const favMutation = useMutation({
@@ -33,91 +51,190 @@ export function Inspector() {
     },
   });
 
-  if (!projectId) {
-    return (
-      <aside className="flex h-full w-full min-w-0 flex-col border-l border-border bg-panel">
-        <div className="border-b border-border px-3 py-3 text-[12px] font-semibold uppercase tracking-wide text-muted">
-          Inspector
-        </div>
-        <div className="p-4 text-[12.5px] text-muted">
-          Seleccione un proyecto para ver detalles.
-        </div>
-      </aside>
-    );
-  }
-
-  if (project.isLoading || !project.data) {
-    return (
-      <aside className="h-full w-full min-w-0 border-l border-border bg-panel p-4 text-muted">
-        Cargando…
-      </aside>
-    );
-  }
-
-  const p = project.data;
-  const isFav = p.is_favorite === 1;
-
   return (
     <aside className="flex h-full w-full min-w-0 flex-col border-l border-border bg-panel">
-      <div className="border-b border-border px-3 py-3 text-[12px] font-semibold uppercase tracking-wide text-muted">
-        Inspector
-      </div>
-      <div className="space-y-4 overflow-auto p-4">
-        <div>
-          <div className="font-mono text-[15px] font-semibold text-accent">
-            {p.code}
-          </div>
-          <div className="text-[15px] font-medium">{p.name}</div>
-        </div>
-
-        <Meta label="Cliente" value={p.client_name ?? "—"} />
-        <Meta label="Estado" value={p.status} />
-        <Meta label="Ruta" value={p.root_relative_path} mono />
-        <Meta label="Inicio" value={p.start_date ?? "—"} />
-        <Meta label="Fin" value={p.end_date ?? "—"} />
-        <Meta
-          label="Descripción"
-          value={p.description?.trim() ? p.description : "—"}
-        />
-        <Meta label="Creado" value={new Date(p.created_at).toLocaleString()} />
-        <Meta
-          label="Última apertura"
-          value={
-            p.last_opened_at
-              ? new Date(p.last_opened_at).toLocaleString()
-              : "—"
-          }
-        />
-
-        <div className="flex flex-wrap gap-2 pt-2">
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => favMutation.mutate(!isFav)}
+      <div className="flex border-b border-border">
+        {(
+          [
+            ["project", "Proyecto"],
+            ["file", "Archivo"],
+            ["trash", "Papelera"],
+          ] as const
+        ).map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => setInspectorTab(id)}
+            className={cn(
+              "h-[36px] flex-1 text-[12px]",
+              inspectorTab === id
+                ? "border-b-2 border-accent text-text"
+                : "text-muted hover:text-text",
+            )}
           >
-            <Star
-              size={14}
-              className={isFav ? "text-warn" : undefined}
-              fill={isFav ? "currentColor" : "none"}
-            />
-            {isFav ? "Quitar favorito" : "Favorito"}
-          </Button>
-          {p.status === "active" && (
-            <Button
-              variant="danger"
-              size="sm"
-              onClick={() => archiveMutation.mutate()}
-              disabled={archiveMutation.isPending}
-            >
-              Archivar
-            </Button>
-          )}
-        </div>
+            {label}
+          </button>
+        ))}
+      </div>
 
-        <p className="text-[11.5px] text-muted">
-          Edición avanzada, versiones y transmisiones llegan en fases
-          posteriores. Acciones no implementadas no se muestran como activas.
-        </p>
+      <div className="min-h-0 flex-1 overflow-auto p-4">
+        {inspectorTab === "project" && (
+          <>
+            {!projectId && (
+              <p className="text-[12.5px] text-muted">
+                Seleccione un proyecto para ver detalles.
+              </p>
+            )}
+            {projectId && project.isLoading && (
+              <p className="text-muted">Cargando…</p>
+            )}
+            {project.data && (
+              <div className="space-y-4">
+                <div>
+                  <div className="font-mono text-[15px] font-semibold text-accent">
+                    {project.data.code}
+                  </div>
+                  <div className="text-[15px] font-medium">{project.data.name}</div>
+                </div>
+                <Meta label="Cliente" value={project.data.client_name ?? "—"} />
+                <Meta label="Estado" value={project.data.status} />
+                <Meta label="Ruta" value={project.data.root_relative_path} mono />
+                <Meta label="Descripción" value={project.data.description ?? "—"} />
+                <div className="flex flex-wrap gap-2 pt-2">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() =>
+                      favMutation.mutate(project.data!.is_favorite !== 1)
+                    }
+                  >
+                    <Star
+                      size={14}
+                      className={
+                        project.data.is_favorite === 1 ? "text-warn" : undefined
+                      }
+                      fill={
+                        project.data.is_favorite === 1 ? "currentColor" : "none"
+                      }
+                    />
+                    Favorito
+                  </Button>
+                  {project.data.status === "active" && (
+                    <Button
+                      variant="danger"
+                      size="sm"
+                      onClick={() => archiveMutation.mutate()}
+                    >
+                      Archivar
+                    </Button>
+                  )}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+
+        {inspectorTab === "file" && (
+          <>
+            {!selectedPath && (
+              <p className="text-[12.5px] text-muted">
+                Seleccione un archivo o carpeta en el administrador.
+              </p>
+            )}
+            {selectedPath && props.isLoading && (
+              <p className="text-muted">Cargando propiedades…</p>
+            )}
+            {props.error && (
+              <p className="text-error">{String(props.error)}</p>
+            )}
+            {props.data && (
+              <div className="space-y-3">
+                <div className="text-[14px] font-medium">{props.data.name}</div>
+                <Meta label="Tipo" value={props.data.is_directory ? "Carpeta" : "Archivo"} />
+                <Meta label="Extensión" value={props.data.extension ?? "—"} />
+                <Meta label="Tamaño" value={formatBytes(props.data.size_bytes)} />
+                <Meta
+                  label="Modificado"
+                  value={
+                    props.data.modified_at
+                      ? new Date(props.data.modified_at).toLocaleString()
+                      : "—"
+                  }
+                />
+                <Meta
+                  label="Creado"
+                  value={
+                    props.data.created_at
+                      ? new Date(props.data.created_at).toLocaleString()
+                      : "—"
+                  }
+                />
+                <Meta label="Ruta relativa" value={props.data.relative_path} mono />
+                <Meta
+                  label="Ingeniería"
+                  value={props.data.is_engineering ? "Sí (referencias manuales)" : "No"}
+                />
+                <Meta label="Solo lectura" value={props.data.readonly ? "Sí" : "No"} />
+                {selectedPaths.length > 1 && (
+                  <p className="text-[12px] text-muted">
+                    +{selectedPaths.length - 1} más seleccionados
+                  </p>
+                )}
+              </div>
+            )}
+          </>
+        )}
+
+        {inspectorTab === "trash" && (
+          <div className="space-y-3">
+            <p className="text-[12px] text-muted">
+              Papelera propia de IngManager (bajo .ingmanager/trash).
+            </p>
+            {trash.isLoading && <p className="text-muted">Cargando…</p>}
+            {(trash.data?.length ?? 0) === 0 && !trash.isLoading && (
+              <p className="text-[12.5px] text-muted">Papelera vacía.</p>
+            )}
+            <ul className="space-y-2">
+              {trash.data?.map((item) => (
+                <li
+                  key={item.id}
+                  className="border border-border bg-elevated p-2 text-[12px]"
+                >
+                  <div className="font-medium">{item.name ?? item.original_path}</div>
+                  <div className="truncate text-muted">{item.original_path}</div>
+                  <div className="text-[11px] text-muted">
+                    {new Date(item.deleted_at).toLocaleString()}
+                  </div>
+                  <div className="mt-2 flex gap-1">
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={async () => {
+                        await api.restoreTrashItem(item.id);
+                        await qc.invalidateQueries({ queryKey: ["trash"] });
+                        await qc.invalidateQueries({ queryKey: ["fm-entries"] });
+                        await qc.invalidateQueries({ queryKey: ["categories"] });
+                      }}
+                    >
+                      Restaurar
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="danger"
+                      onClick={async () => {
+                        if (!window.confirm("¿Eliminar permanentemente?")) return;
+                        await api.purgeTrashItem(item.id);
+                        await qc.invalidateQueries({ queryKey: ["trash"] });
+                      }}
+                    >
+                      <Trash2 size={12} /> Purgar
+                    </Button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </div>
     </aside>
   );
@@ -137,7 +254,7 @@ function Meta({
       <div className="text-[11px] font-medium uppercase tracking-wide text-muted">
         {label}
       </div>
-      <div className={mono ? "font-mono text-[12.5px]" : "text-[13px]"}>
+      <div className={mono ? "break-all font-mono text-[12px]" : "text-[13px]"}>
         {value}
       </div>
     </div>

@@ -37,6 +37,16 @@ import type {
   TrashItem,
   UpdateDocumentInput,
   UpdateProjectInput,
+  OrganizerScanItem,
+  OrganizerPlanResult,
+  OrganizerApplyResult,
+  OrganizerSession,
+  InboxItem,
+  InboxAssignInput,
+  InboxAssignResult,
+  PendingVersionEvent,
+  AutoVersionResult,
+  FolderMappingRow,
 } from "./types";
 
 export const api = {
@@ -321,4 +331,60 @@ export const api = {
     }),
   openTransmissionFolder: (transmissionId: string) =>
     invoke<void>("open_transmission_folder", { transmissionId }),
+
+  organizerScan: (scopeAbsolutePath: string) =>
+    invoke<OrganizerScanItem[]>("organizer_scan", { scopeAbsolutePath }),
+  organizerBuildPlan: (
+    scopeAbsolutePath: string,
+    mode: string,
+    projectIds?: string[] | null,
+  ) =>
+    invoke<OrganizerPlanResult>("organizer_build_plan", {
+      scopeAbsolutePath,
+      mode,
+      projectIds: projectIds ?? null,
+    }),
+  organizerGetPlan: (sessionId: string) =>
+    invoke<OrganizerPlanResult>("organizer_get_plan", { sessionId }),
+  organizerApplyPlan: (sessionId: string) =>
+    invoke<OrganizerApplyResult>("organizer_apply_plan", { sessionId }),
+  organizerListSessions: () =>
+    invoke<OrganizerSession[]>("organizer_list_sessions"),
+  listProjectFolderMappings: (projectId: string) =>
+    invoke<FolderMappingRow[]>("list_project_folder_mappings", { projectId }),
+
+  inboxEnsureDir: () => invoke<string>("inbox_ensure_dir"),
+  inboxList: () => invoke<InboxItem[]>("inbox_list"),
+  inboxStageFiles: (paths: string[], copyInto = true) =>
+    invoke<InboxItem[]>("inbox_stage_files", { paths, copyInto }),
+  inboxRemoveItems: (ids: string[], deleteFiles = true) =>
+    invoke<number>("inbox_remove_items", { ids, deleteFiles }),
+  inboxAssign: (input: InboxAssignInput) =>
+    invoke<InboxAssignResult>("inbox_assign", { input }),
+
+  listPendingVersions: (projectId?: string | null) =>
+    invoke<PendingVersionEvent[]>("list_pending_versions", {
+      projectId: projectId ?? null,
+    }),
+  resolvePendingVersion: (pendingId: string, documentId: string) =>
+    invoke<AutoVersionResult>("resolve_pending_version", {
+      pendingId,
+      documentId,
+    }),
+  dismissPendingVersion: (pendingId: string) =>
+    invoke<void>("dismiss_pending_version", { pendingId }),
+  reconcileProjectVersions: (projectId: string) =>
+    invoke<AutoVersionResult[]>("reconcile_project_versions", { projectId }),
+  registerFileVersionBaseline: (
+    projectId: string,
+    documentId: string,
+    absolutePath: string,
+    versionId?: string | null,
+  ) =>
+    invoke<void>("register_file_version_baseline", {
+      projectId,
+      documentId,
+      versionId: versionId ?? null,
+      absolutePath,
+    }),
 };

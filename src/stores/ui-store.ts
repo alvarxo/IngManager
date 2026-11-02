@@ -3,7 +3,10 @@ import { create } from "zustand";
 type View =
   | { kind: "home" }
   | { kind: "project"; projectId: string; categoryKey?: string }
-  | { kind: "settings" };
+  | { kind: "settings" }
+  | { kind: "inbox" }
+  | { kind: "organizer" }
+  | { kind: "pending-versions" };
 
 type InspectorTab =
   | "project"

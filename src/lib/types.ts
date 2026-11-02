@@ -451,3 +451,118 @@ export interface ImportReceivedInput {
   extract_to_antecedentes?: boolean | null;
   link_to_sent_id?: string | null;
 }
+
+export interface ClassifiedFolder {
+  category_key: string;
+  category_name: string;
+  physical_name: string;
+  matched: boolean;
+  standard_target: string;
+}
+
+export interface OrganizerScanItem {
+  project_id: string | null;
+  project_name: string | null;
+  folder_name: string;
+  absolute_path: string;
+  classified: ClassifiedFolder[];
+  unmatched_folders: string[];
+}
+
+export interface OrganizerSession {
+  id: string;
+  authorized_root_id: string | null;
+  scope_absolute_path: string;
+  mode: string;
+  status: string;
+  backup_absolute_path: string | null;
+  notes: string | null;
+  created_at: string;
+  applied_at: string | null;
+}
+
+export interface OrganizerPlanItem {
+  id: string;
+  session_id: string;
+  project_id: string | null;
+  project_folder_name: string;
+  category_key: string | null;
+  source_relative_path: string;
+  target_relative_path: string | null;
+  action: string;
+  confidence: number;
+  status: string;
+  detail: string | null;
+  sort_order: number;
+  created_at: string;
+}
+
+export interface OrganizerPlanResult {
+  session: OrganizerSession;
+  items: OrganizerPlanItem[];
+}
+
+export interface OrganizerApplyResult {
+  session_id: string;
+  applied: number;
+  failed: number;
+  skipped: number;
+  backup_path: string | null;
+  journal_entries: number;
+}
+
+export interface InboxItem {
+  id: string;
+  absolute_path: string;
+  file_name: string;
+  extension: string | null;
+  size_bytes: number | null;
+  modified_at: string | null;
+  staged_at: string;
+  status: string;
+  notes: string | null;
+}
+
+export interface InboxAssignInput {
+  item_ids: string[];
+  project_ids: string[];
+  category_key: string;
+  mode?: string | null;
+}
+
+export interface InboxAssignResult {
+  assigned: number;
+  failures: string[];
+  dest_paths: string[];
+}
+
+export interface PendingVersionEvent {
+  id: string;
+  project_id: string;
+  absolute_path: string;
+  file_name: string;
+  base_stem: string;
+  version_hint: string | null;
+  reason: string;
+  candidate_document_ids_json: string | null;
+  status: string;
+  resolved_document_id: string | null;
+  created_at: string;
+  resolved_at: string | null;
+}
+
+export interface AutoVersionResult {
+  path: string;
+  action: string;
+  document_id: string | null;
+  version_id: string | null;
+  pending_id: string | null;
+  message: string;
+}
+
+export interface FolderMappingRow {
+  id: string;
+  category_key: string;
+  physical_relative_path: string;
+  mapping_mode: string;
+}

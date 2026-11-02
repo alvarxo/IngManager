@@ -111,6 +111,21 @@ pub fn start_roots_watcher(
                                     },
                                 );
                             } else {
+                                // Auto-version after index reconcile (debounce already applied).
+                                let av = crate::auto_version::process_watcher_batch(&pool, &batch)
+                                    .await
+                                    .unwrap_or_default();
+                                let msg = if av.iter().any(|r| r.action == "version_created") {
+                                    let n = av
+                                        .iter()
+                                        .filter(|r| r.action == "version_created")
+                                        .count();
+                                    format!("Índice reconciliado · {n} auto-versión(es)")
+                                } else if av.iter().any(|r| r.action == "pending") {
+                                    "Índice reconciliado · versiones pendientes".into()
+                                } else {
+                                    "Índice reconciliado".into()
+                                };
                                 let _ = app.emit(
                                     "fs-changed",
                                     IndexProgress {
@@ -119,7 +134,7 @@ pub fn start_roots_watcher(
                                         total_hint: None,
                                         current_path: None,
                                         done: true,
-                                        message: Some("Índice reconciliado".into()),
+                                        message: Some(msg),
                                     },
                                 );
                             }

@@ -1,4 +1,5 @@
 mod audit;
+mod auto_version;
 mod category_mapping;
 mod codes;
 mod commands;
@@ -12,8 +13,12 @@ mod flexibility_tests;
 #[cfg(test)]
 mod fs_ops_tests;
 mod fs_util;
+mod inbox;
 mod index_sync;
 mod models;
+#[cfg(test)]
+mod organizer_inbox_tests;
+mod organizer;
 mod path_security;
 mod project_paths;
 mod search_index;
@@ -115,6 +120,23 @@ pub fn run() {
             commands::file_manager::get_entry_properties,
             commands::file_manager::open_path,
             commands::watcher_cmd::start_file_watcher,
+            commands::organizer::organizer_scan,
+            commands::organizer::organizer_build_plan,
+            commands::organizer::organizer_get_plan,
+            commands::organizer::organizer_apply_plan,
+            commands::organizer::organizer_list_sessions,
+            commands::organizer::list_project_folder_mappings,
+            commands::inbox_cmd::inbox_ensure_dir,
+            commands::inbox_cmd::inbox_list,
+            commands::inbox_cmd::inbox_stage_files,
+            commands::inbox_cmd::inbox_remove_items,
+            commands::inbox_cmd::inbox_assign,
+            commands::auto_version_cmd::list_pending_versions,
+            commands::auto_version_cmd::resolve_pending_version,
+            commands::auto_version_cmd::dismiss_pending_version,
+            commands::auto_version_cmd::reconcile_project_versions,
+            commands::auto_version_cmd::register_file_version_baseline,
+            commands::auto_version_cmd::process_auto_version_path,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

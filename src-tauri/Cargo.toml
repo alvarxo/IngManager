@@ -1,0 +1,41 @@
+[package]
+name = "ingmanager"
+version = "0.1.0"
+description = "IngManager — Gestión de Proyectos de Ingeniería"
+authors = ["IngManager"]
+edition = "2021"
+
+[lib]
+name = "ingmanager_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono", "uuid", "migrate"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "fs"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "2"
+anyhow = "1"
+dirs = "6"
+notify = "7"
+walkdir = "2"
+open = "5"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

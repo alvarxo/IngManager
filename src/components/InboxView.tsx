@@ -1,8 +1,9 @@
-import { useCallback, useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Inbox, Trash2, FolderInput } from "lucide-react";
 import { api } from "@/lib/api";
+import { useNativeFileDrop } from "@/hooks/useNativeFileDrop";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -22,7 +23,8 @@ export function InboxView() {
   const [categoryKey, setCategoryKey] = useState("modelos");
   const [mode, setMode] = useState<"copy" | "move">("copy");
   const [message, setMessage] = useState<string | null>(null);
-  const [dragOver, setDragOver] = useState(false);
+  const [osDragOver, setOsDragOver] = useState(false);
+  const dropZoneRef = useRef<HTMLDivElement>(null);
 
   const items = useQuery({
     queryKey: ["inbox"],
@@ -35,9 +37,13 @@ export function InboxView() {
 
   const stage = useMutation({
     mutationFn: (paths: string[]) => api.inboxStageFiles(paths, true),
-    onSuccess: () => {
+    onSuccess: (staged) => {
       void qc.invalidateQueries({ queryKey: ["inbox"] });
-      setMessage("Archivos añadidos a la bandeja");
+      setMessage(
+        staged.length
+          ? `${staged.length} archivo(s) añadidos a la bandeja`
+          : "Archivos añadidos a la bandeja",
+      );
     },
     onError: (e) => setMessage(String(e)),
   });
@@ -79,25 +85,18 @@ export function InboxView() {
     stage.mutate(paths);
   };
 
-  const onDrop = useCallback(
-    (e: React.DragEvent) => {
-      e.preventDefault();
-      setDragOver(false);
-      const files = Array.from(e.dataTransfer.files ?? []);
-      // Tauri file drops expose path on File when available
-      const paths = files
-        .map((f) => (f as File & { path?: string }).path)
-        .filter((p): p is string => Boolean(p));
+  useNativeFileDrop(dropZoneRef, {
+    onDrop: (paths) => {
       if (paths.length === 0) {
         setMessage(
-          "Arrastre desde el explorador del SO (rutas Tauri). Use «Añadir archivos» si el drop no expone path.",
+          "No se recibieron rutas del SO. Use «Añadir archivos» (diálogo).",
         );
         return;
       }
       stage.mutate(paths);
     },
-    [stage],
-  );
+    onActiveChange: setOsDragOver,
+  });
 
   const toggleProject = (id: string) => {
     setProjectIds((prev) =>
@@ -113,7 +112,8 @@ export function InboxView() {
         <div>
           <h1 className="text-[15px] font-semibold text-text">Bandeja global</h1>
           <p className="text-[12px] text-muted">
-            Staging · asignación multi-proyecto · copia por defecto
+            Staging · asignación multi-proyecto · copia por defecto · drop nativo
+            Tauri (rutas reales)
           </p>
         </div>
         <div className="flex gap-2">
@@ -134,21 +134,17 @@ export function InboxView() {
       </header>
 
       <div
+        ref={dropZoneRef}
         className={cn(
           "mx-4 mt-3 flex min-h-[88px] items-center justify-center rounded-[var(--radius-sm)] border border-dashed px-3 text-[12px]",
-          dragOver
+          osDragOver
             ? "border-accent bg-selection text-text"
             : "border-border text-muted",
         )}
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDragOver(true);
-        }}
-        onDragLeave={() => setDragOver(false)}
-        onDrop={onDrop}
       >
         <Inbox size={16} className="mr-2 shrink-0" />
-        Arrastre archivos aquí (compatible Tauri path) o use «Añadir archivos»
+        Arrastre archivos o carpetas desde el Explorador (rutas nativas Tauri) o
+        use «Añadir archivos»
       </div>
 
       {message && (

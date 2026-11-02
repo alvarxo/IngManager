@@ -4,6 +4,8 @@ import type {
   AttachFileInput,
   CategorySummary,
   ConflictPolicy,
+  ExternalDropMode,
+  ExternalDropPreview,
   CreateDocumentInput,
   CreateProjectInput,
   CreateRevisionInput,
@@ -158,6 +160,28 @@ export const api = {
     invoke<FileOpResult>("import_files", {
       sourcePaths,
       destDir,
+      conflictPolicy,
+    }),
+  previewExternalDrop: (
+    sourcePaths: string[],
+    destDir: string,
+    conflictPolicy: ConflictPolicy = "rename",
+  ) =>
+    invoke<ExternalDropPreview>("preview_external_drop", {
+      sourcePaths,
+      destDir,
+      conflictPolicy,
+    }),
+  applyExternalDrop: (
+    sourcePaths: string[],
+    destDir: string,
+    mode: ExternalDropMode = "copy",
+    conflictPolicy: ConflictPolicy = "rename",
+  ) =>
+    invoke<FileOpResult>("apply_external_drop", {
+      sourcePaths,
+      destDir,
+      mode,
       conflictPolicy,
     }),
   deleteToTrash: (paths: string[], acknowledgeEngineering = false) =>

@@ -67,6 +67,13 @@ async fn run_migrations(pool: &SqlitePool) -> AppResult<()> {
         include_str!("../migrations/004_phase5_advanced.sql"),
     )
     .await?;
+    apply_migration(
+        pool,
+        5,
+        "005_project_flexibility",
+        include_str!("../migrations/005_project_flexibility.sql"),
+    )
+    .await?;
 
     Ok(())
 }

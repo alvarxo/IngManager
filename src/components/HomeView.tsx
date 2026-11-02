@@ -57,7 +57,7 @@ export function HomeView() {
                     setView({ kind: "project", projectId: p.id });
                   }}
                 >
-                  <td className="px-2 font-mono text-accent">{p.code}</td>
+                  <td className="px-2 font-mono text-accent">{p.code ?? "—"}</td>
                   <td className="px-2">{p.name}</td>
                   <td className="px-2 text-muted">{p.client_name ?? "—"}</td>
                 </tr>
@@ -87,7 +87,7 @@ export function HomeView() {
                     setView({ kind: "project", projectId: p.id });
                   }}
                 >
-                  <span className="font-mono text-accent">{p.code}</span>
+                  <span className="font-mono text-accent">{p.code ?? "—"}</span>
                   <span>{p.name}</span>
                 </button>
               </li>

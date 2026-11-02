@@ -1,12 +1,23 @@
+export interface AuthorizedRoot {
+  id: string;
+  absolute_path: string;
+  label: string | null;
+  is_primary: number;
+  created_at: string;
+}
+
 export interface Project {
   id: string;
-  code: string;
+  code: string | null;
   name: string;
   description: string | null;
   client_id: string | null;
   client_name: string | null;
   status: "active" | "archived" | "cancelled" | "completed" | string;
+  authorized_root_id: string;
   root_relative_path: string;
+  import_mode: string;
+  layout_mode: string;
   start_date: string | null;
   end_date: string | null;
   is_favorite: number;
@@ -21,6 +32,10 @@ export interface CreateProjectInput {
   client_name?: string | null;
   start_date?: string | null;
   end_date?: string | null;
+  code?: string | null;
+  folder_name?: string | null;
+  authorized_root_id?: string | null;
+  create_standard_folders?: boolean | null;
 }
 
 export interface UpdateProjectInput {
@@ -45,6 +60,7 @@ export interface CategorySummary {
 export interface IndexedFile {
   id: string;
   project_id: string | null;
+  authorized_root_id?: string | null;
   relative_path: string;
   absolute_path: string;
   file_name: string;
@@ -62,6 +78,7 @@ export interface AppStatus {
   root_valid: boolean;
   project_count: number;
   db_path: string;
+  authorized_roots: AuthorizedRoot[];
 }
 
 export interface IndexProgress {
@@ -263,6 +280,13 @@ export interface BackupResult {
   project_count: number;
 }
 
+export interface CategoryMappingPreview {
+  key: string;
+  name: string;
+  relative_path: string;
+  matched: boolean;
+}
+
 export interface DetectedFolder {
   absolute_path: string;
   name: string;
@@ -271,32 +295,51 @@ export interface DetectedFolder {
   matched_standard_folders: string[];
   looks_like_project: boolean;
   conflict_with_existing: boolean;
+  under_authorized_root: boolean;
+  authorized_root_id: string | null;
+  relative_to_root: string | null;
+  category_mappings: CategoryMappingPreview[];
 }
 
 export interface ImportPreview {
   source_path: string;
+  mode: string;
   target_relative_path: string;
   target_absolute_path: string;
+  authorized_root_id: string | null;
   will_overwrite: boolean;
+  will_copy: boolean;
+  link_in_place: boolean;
   folders_to_create: string[];
+  category_mappings: CategoryMappingPreview[];
   file_count_hint: number;
+  requires_authorize_root: boolean;
+  suggested_authorize_path: string | null;
 }
+
+export type ImportMode = "link" | "copy" | "reorganize_later";
 
 export interface ImportProjectInput {
   source_path: string;
-  code: string;
   name: string;
+  code?: string | null;
   description?: string | null;
   client_name?: string | null;
+  mode?: ImportMode | string | null;
+  folder_name?: string | null;
+  authorized_root_id?: string | null;
   confirm_overwrite?: boolean | null;
-  copy_files?: boolean | null;
+  authorize_parent_path?: string | null;
+  create_missing_folders?: boolean | null;
 }
 
 export interface ImportProjectResult {
   project_id: string;
-  code: string;
+  code: string | null;
   target_path: string;
+  mode: string;
   copied: boolean;
+  linked: boolean;
 }
 
 export interface CreateVersionInput {

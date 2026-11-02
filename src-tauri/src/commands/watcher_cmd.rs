@@ -1,26 +1,21 @@
-use std::path::PathBuf;
-
 use tauri::{AppHandle, State};
 
-use crate::db;
 use crate::error::{AppError, AppResult};
+use crate::project_paths;
 use crate::state::AppState;
 use crate::watcher;
 
 #[tauri::command]
 pub async fn start_file_watcher(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
-    let root = db::get_setting(&state.pool, "root_path")
-        .await?
-        .ok_or_else(|| AppError::msg("Configure la carpeta raíz primero"))?;
-    let root = PathBuf::from(root);
-    if !root.is_dir() {
-        return Err(AppError::msg("La carpeta raíz no es accesible"));
+    let roots = project_paths::load_root_paths(&state.pool).await?;
+    if roots.is_empty() {
+        return Err(AppError::msg("Configure la carpeta raíz primero"));
     }
 
-    let handle = watcher::start_root_watcher(
+    let handle = watcher::start_roots_watcher(
         app,
         state.pool.clone(),
-        root,
+        roots,
         state.indexing.clone(),
     )
     .map_err(AppError::msg)?;

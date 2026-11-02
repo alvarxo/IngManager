@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
@@ -6,13 +6,15 @@ use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
+use crate::category_mapping::infer_category_key_flexible;
 use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::models::IndexProgress;
 use crate::path_security::ensure_under_root;
+use crate::project_paths;
 use crate::state::AppState;
 
-use crate::index_sync::{self, infer_category_key};
+use crate::index_sync;
 
 fn system_time_to_rfc3339(time: SystemTime) -> Option<String> {
     let dt: DateTime<Utc> = time.into();
@@ -31,18 +33,13 @@ pub async fn start_initial_index(app: AppHandle, state: State<'_, AppState>) -> 
 
     let pool = state.pool.clone();
     let indexing = state.indexing.clone();
-    let root = match db::get_setting(&pool, "root_path").await? {
-        Some(r) => PathBuf::from(r),
-        None => {
+    let roots = match project_paths::load_root_paths(&pool).await {
+        Ok(r) if !r.is_empty() => r,
+        _ => {
             *indexing.write().await = false;
             return Err(AppError::msg("Configure la carpeta raíz primero"));
         }
     };
-
-    if !root.is_dir() {
-        *indexing.write().await = false;
-        return Err(AppError::msg("La carpeta raíz no es accesible"));
-    }
 
     let last = db::get_setting(&pool, "last_full_index_at").await?;
     if last.is_some() {
@@ -65,7 +62,7 @@ pub async fn start_initial_index(app: AppHandle, state: State<'_, AppState>) -> 
     }
 
     tokio::spawn(async move {
-        let result = run_index(&app, &pool, &root).await;
+        let result = run_index_all(&app, &pool, &roots).await;
         if let Err(e) = result {
             let _ = app.emit(
                 "index-progress",
@@ -97,15 +94,14 @@ pub async fn reindex_root(app: AppHandle, state: State<'_, AppState>) -> AppResu
 
     let pool = state.pool.clone();
     let indexing = state.indexing.clone();
-    let root = match db::get_setting(&pool, "root_path").await? {
-        Some(r) => PathBuf::from(r),
-        None => {
+    let roots = match project_paths::load_root_paths(&pool).await {
+        Ok(r) if !r.is_empty() => r,
+        _ => {
             *indexing.write().await = false;
             return Err(AppError::msg("Configure la carpeta raíz primero"));
         }
     };
 
-    // Clear last marker so full scan runs
     let _ = db::set_setting(&pool, "last_full_index_at", "").await;
     sqlx::query("DELETE FROM app_settings WHERE key = 'last_full_index_at'")
         .execute(&pool)
@@ -113,7 +109,7 @@ pub async fn reindex_root(app: AppHandle, state: State<'_, AppState>) -> AppResu
         .ok();
 
     tokio::spawn(async move {
-        let result = run_index(&app, &pool, &root).await;
+        let result = run_index_all(&app, &pool, &roots).await;
         if let Err(e) = result {
             let _ = app.emit(
                 "index-progress",
@@ -133,130 +129,134 @@ pub async fn reindex_root(app: AppHandle, state: State<'_, AppState>) -> AppResu
     Ok(())
 }
 
-async fn run_index(app: &AppHandle, pool: &sqlx::SqlitePool, root: &Path) -> AppResult<()> {
-    let _ = app.emit(
-        "index-progress",
-        IndexProgress {
-            phase: "scanning".into(),
-            scanned: 0,
-            total_hint: None,
-            current_path: Some(root.display().to_string()),
-            done: false,
-            message: Some("Escaneando carpeta raíz…".into()),
-        },
-    );
-
-    // Map project folders (first-level dirs that match project codes)
-    let projects: Vec<(String, String)> =
-        sqlx::query_as("SELECT id, root_relative_path FROM projects")
+async fn run_index_all(
+    app: &AppHandle,
+    pool: &sqlx::SqlitePool,
+    roots: &[PathBuf],
+) -> AppResult<()> {
+    let auth_roots = project_paths::list_authorized_roots(pool).await?;
+    let projects: Vec<(String, String, String)> =
+        sqlx::query_as("SELECT id, authorized_root_id, root_relative_path FROM projects")
             .fetch_all(pool)
             .await?;
-
-    let project_map: std::collections::HashMap<String, String> = projects
-        .into_iter()
-        .map(|(id, rel)| (rel, id))
-        .collect();
 
     sqlx::query("DELETE FROM indexed_files").execute(pool).await?;
 
     let mut scanned: u64 = 0;
     let mut batch = Vec::new();
 
-    for entry in WalkDir::new(root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy();
-        if index_sync::should_skip_name(&name) {
+    for root_row in &auth_roots {
+        let root = PathBuf::from(&root_row.absolute_path);
+        if !root.is_dir() {
             continue;
         }
+        let _ = app.emit(
+            "index-progress",
+            IndexProgress {
+                phase: "scanning".into(),
+                scanned,
+                total_hint: None,
+                current_path: Some(root.display().to_string()),
+                done: false,
+                message: Some(format!("Escaneando raíz {}…", root.display())),
+            },
+        );
 
-        // Ensure still under root (symlink / escape guard)
-        if ensure_under_root(root, path).is_err() {
-            continue;
-        }
+        for entry in WalkDir::new(&root)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy();
+            if index_sync::should_skip_name(&name) {
+                continue;
+            }
+            if ensure_under_root(&root, path).is_err() {
+                continue;
+            }
+            let rel = match path.strip_prefix(&root) {
+                Ok(r) => r.to_string_lossy().replace('\\', "/"),
+                Err(_) => continue,
+            };
+            if rel.is_empty() {
+                continue;
+            }
 
-        let rel = match path.strip_prefix(root) {
-            Ok(r) => r.to_string_lossy().replace('\\', "/"),
-            Err(_) => continue,
-        };
+            let meta = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let is_dir = meta.is_dir();
 
-        if rel.is_empty() {
-            continue;
-        }
+            let project = projects.iter().filter(|(_, rid, prel)| {
+                *rid == root_row.id && (rel == *prel || rel.starts_with(&format!("{prel}/")))
+            }).max_by_key(|(_, _, prel)| prel.len());
 
-        let meta = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
+            let project_id = project.map(|(id, _, _)| id.clone());
+            let category_key = project.and_then(|(_, _, prel)| {
+                let rest = rel.strip_prefix(prel).map(|s| s.trim_start_matches('/'))?;
+                if rest.is_empty() {
+                    None
+                } else {
+                    infer_category_key_flexible(rest).map(|s| s.to_string())
+                }
+            });
 
-        let is_dir = meta.is_dir();
-        let project_code = rel.split('/').next().unwrap_or("").to_string();
-        let project_id = project_map.get(&project_code).cloned();
+            let extension = if is_dir {
+                None
+            } else {
+                path.extension()
+                    .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            };
+            let modified = meta.modified().ok().and_then(system_time_to_rfc3339);
+            let size = if is_dir { None } else { Some(meta.len() as i64) };
 
-        let category_key = if let Some(rest) = rel.strip_prefix(&format!("{project_code}/")) {
-            infer_category_key(rest).map(|s| s.to_string())
-        } else {
-            None
-        };
+            batch.push((
+                Uuid::new_v4().to_string(),
+                project_id,
+                root_row.id.clone(),
+                rel.clone(),
+                path.display().to_string(),
+                name.to_string(),
+                extension,
+                size,
+                modified,
+                if is_dir { 1i64 } else { 0 },
+                1i64,
+                category_key,
+            ));
 
-        let extension = if is_dir {
-            None
-        } else {
-            path.extension()
-                .map(|e| e.to_string_lossy().to_ascii_lowercase())
-        };
-
-        let modified = meta.modified().ok().and_then(system_time_to_rfc3339);
-        let size = if is_dir { None } else { Some(meta.len() as i64) };
-
-        batch.push((
-            Uuid::new_v4().to_string(),
-            project_id,
-            rel.clone(),
-            path.display().to_string(),
-            name.to_string(),
-            extension,
-            size,
-            modified,
-            if is_dir { 1i64 } else { 0 },
-            1i64,
-            category_key,
-        ));
-
-        scanned += 1;
-        if scanned % 50 == 0 {
-            let _ = app.emit(
-                "index-progress",
-                IndexProgress {
-                    phase: "scanning".into(),
-                    scanned,
-                    total_hint: None,
-                    current_path: Some(rel),
-                    done: false,
-                    message: None,
-                },
-            );
-        }
-
-        if batch.len() >= 100 {
-            flush_batch(pool, &batch).await?;
-            batch.clear();
+            scanned += 1;
+            if scanned % 50 == 0 {
+                let _ = app.emit(
+                    "index-progress",
+                    IndexProgress {
+                        phase: "scanning".into(),
+                        scanned,
+                        total_hint: None,
+                        current_path: Some(rel),
+                        done: false,
+                        message: None,
+                    },
+                );
+            }
+            if batch.len() >= 100 {
+                flush_batch(pool, &batch).await?;
+                batch.clear();
+            }
         }
     }
+
+    // Also touch unused `roots` param for API symmetry / future filters
+    let _ = roots;
 
     if !batch.is_empty() {
         flush_batch(pool, &batch).await?;
     }
 
-    db::set_setting(
-        pool,
-        "last_full_index_at",
-        &Utc::now().to_rfc3339(),
-    )
-    .await?;
+    db::set_setting(pool, "last_full_index_at", &Utc::now().to_rfc3339())
+        .await?;
 
     let _ = app.emit(
         "index-progress",
@@ -296,6 +296,7 @@ async fn flush_batch(
         String,
         String,
         String,
+        String,
         Option<String>,
         Option<i64>,
         Option<String>,
@@ -308,10 +309,10 @@ async fn flush_batch(
     for row in batch {
         sqlx::query(
             "INSERT INTO indexed_files (
-                id, project_id, relative_path, absolute_path, file_name, extension,
+                id, project_id, authorized_root_id, relative_path, absolute_path, file_name, extension,
                 size_bytes, modified_at, is_directory, is_available, category_key, indexed_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-             ON CONFLICT(relative_path) DO UPDATE SET
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+             ON CONFLICT(authorized_root_id, relative_path) DO UPDATE SET
                 project_id = excluded.project_id,
                 absolute_path = excluded.absolute_path,
                 file_name = excluded.file_name,
@@ -331,9 +332,10 @@ async fn flush_batch(
         .bind(&row.5)
         .bind(&row.6)
         .bind(&row.7)
-        .bind(row.8)
+        .bind(&row.8)
         .bind(row.9)
-        .bind(&row.10)
+        .bind(row.10)
+        .bind(&row.11)
         .execute(&mut *tx)
         .await?;
     }

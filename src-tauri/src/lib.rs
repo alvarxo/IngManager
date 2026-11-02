@@ -1,4 +1,5 @@
 mod audit;
+mod category_mapping;
 mod codes;
 mod commands;
 mod db;
@@ -7,11 +8,14 @@ mod db_tests;
 mod doc_codes;
 mod error;
 #[cfg(test)]
+mod flexibility_tests;
+#[cfg(test)]
 mod fs_ops_tests;
 mod fs_util;
 mod index_sync;
 mod models;
 mod path_security;
+mod project_paths;
 mod search_index;
 mod state;
 mod watcher;
@@ -37,6 +41,10 @@ pub fn run() {
             commands::settings::get_app_status,
             commands::settings::set_root_path,
             commands::settings::get_root_path,
+            commands::settings::list_authorized_roots,
+            commands::settings::add_authorized_root,
+            commands::settings::remove_authorized_root,
+            commands::projects::get_project_absolute_path,
             commands::projects::preview_next_project_code,
             commands::projects::list_projects,
             commands::projects::get_project,

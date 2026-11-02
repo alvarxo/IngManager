@@ -65,7 +65,7 @@ export function ProjectWorkspace({ projectId, categoryKey }: Props) {
     <div className="flex h-full min-w-0 flex-1 flex-col bg-bg">
       <div className="flex h-[42px] items-center gap-3 border-b border-border px-4">
         <span className="font-mono text-[13px] font-semibold text-accent">
-          {p.code}
+          {p.code ?? "—"}
         </span>
         <span className="truncate text-[14px] font-medium">{p.name}</span>
         <span className="rounded-[4px] border border-border px-1.5 py-0.5 text-[10px] uppercase text-muted">
@@ -135,13 +135,15 @@ export function ProjectWorkspace({ projectId, categoryKey }: Props) {
         <div className="min-h-0 flex-1 overflow-auto p-6">
           <h2 className="mb-3 text-[15px] font-semibold">Información del proyecto</h2>
           <dl className="mb-6 grid max-w-xl gap-3 text-[13px]">
-            <InfoRow label="Código" value={p.code} mono />
+            <InfoRow label="Código" value={p.code ?? "(sin código)"} mono />
             <InfoRow label="Nombre" value={p.name} />
             <InfoRow label="Cliente" value={p.client_name ?? "—"} />
             <InfoRow label="Estado" value={p.status} />
             <InfoRow label="Descripción" value={p.description ?? "—"} />
             <InfoRow label="Inicio" value={p.start_date ?? "—"} />
             <InfoRow label="Fin" value={p.end_date ?? "—"} />
+            <InfoRow label="Importación" value={p.import_mode} />
+            <InfoRow label="Layout" value={p.layout_mode} />
             <InfoRow label="Ruta relativa" value={p.root_relative_path} mono />
             <InfoRow
               label="Última apertura"

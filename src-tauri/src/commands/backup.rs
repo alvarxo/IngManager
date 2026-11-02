@@ -6,10 +6,9 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 use walkdir::WalkDir;
 
-use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::fs_util::copy_recursively;
-use crate::path_security::{ensure_under_root, join_under_root};
+use crate::path_security::ensure_under_root;
 use crate::state::AppState;
 use crate::zip_safe::create_zip_from_dir;
 
@@ -42,14 +41,7 @@ pub struct BackupProjectEntry {
 }
 
 async fn require_root(state: &AppState) -> AppResult<PathBuf> {
-    let root = db::get_setting(&state.pool, "root_path")
-        .await?
-        .ok_or_else(|| AppError::msg("Configure la carpeta raíz antes de continuar"))?;
-    let path = PathBuf::from(&root);
-    if !path.is_dir() {
-        return Err(AppError::msg("La carpeta raíz no es accesible"));
-    }
-    Ok(path)
+    crate::project_paths::require_primary_root_path(&state.pool).await
 }
 
 /// Consistent SQLite snapshot via VACUUM INTO (safe while DB is open in WAL mode).
@@ -94,13 +86,13 @@ pub async fn create_portable_backup(
     let db_snap = backup_dir.join("db").join("ingmanager.sqlite");
     snapshot_db(&state.pool, &db_snap).await?;
 
-    let projects: Vec<(String, String, String, String)> = if let Some(ids) = &project_ids {
+    let projects: Vec<(String, Option<String>, String, String)> = if let Some(ids) = &project_ids {
         if ids.is_empty() {
             vec![]
         } else {
             let mut out = Vec::new();
             for id in ids {
-                if let Some(row) = sqlx::query_as::<_, (String, String, String, String)>(
+                if let Some(row) = sqlx::query_as::<_, (String, Option<String>, String, String)>(
                     "SELECT id, code, name, root_relative_path FROM projects WHERE id = ?",
                 )
                 .bind(id)
@@ -121,14 +113,18 @@ pub async fn create_portable_backup(
     let mut entries = Vec::new();
     if include_files {
         for (id, code, name, rel) in &projects {
-            let src = join_under_root(&root, rel)?;
+            let loc = crate::project_paths::resolve_project_location(&state.pool, id).await?;
+            let src = loc.absolute_path;
+            let folder_label = code
+                .clone()
+                .unwrap_or_else(|| loc.root_relative_path.replace('/', "_"));
             if src.is_dir() {
-                let dest = backup_dir.join("projects").join(code);
+                let dest = backup_dir.join("projects").join(&folder_label);
                 copy_recursively(&src, &dest)?;
             }
             entries.push(BackupProjectEntry {
                 id: id.clone(),
-                code: code.clone(),
+                code: code.clone().unwrap_or_else(|| folder_label.clone()),
                 name: name.clone(),
                 relative_path: rel.clone(),
             });
@@ -137,7 +133,7 @@ pub async fn create_portable_backup(
         for (id, code, name, rel) in projects {
             entries.push(BackupProjectEntry {
                 id,
-                code,
+                code: code.unwrap_or_else(|| rel.clone()),
                 name,
                 relative_path: rel,
             });

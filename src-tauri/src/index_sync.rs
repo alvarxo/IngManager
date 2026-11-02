@@ -6,8 +6,10 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
+use crate::category_mapping::infer_category_key_flexible;
 use crate::error::AppResult;
-use crate::path_security::ensure_under_root;
+use crate::path_security::{ensure_under_root, path_is_under};
+use crate::project_paths;
 
 pub fn should_skip_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
@@ -25,26 +27,60 @@ fn system_time_to_rfc3339(time: SystemTime) -> Option<String> {
     Some(dt.to_rfc3339())
 }
 
+/// Back-compat wrapper used by file_manager entry_from_path.
 pub fn infer_category_key(project_relative: &str) -> Option<&'static str> {
-    let first = project_relative.split(['/', '\\']).next().unwrap_or("");
-    match first {
-        "01_ANTECEDENTES" => Some("antecedentes"),
-        "02_MODELOS" => Some("modelos"),
-        "03_PLANOS" => Some("planos"),
-        "04_MEMORIAS" => Some("memorias"),
-        "05_ADMINISTRACION" => Some("admin"),
-        "06_TRANSMISIONES" => Some("transmisiones"),
-        "07_OTROS" => Some("otros"),
-        _ => None,
-    }
+    infer_category_key_flexible(project_relative)
 }
 
-async fn project_map(pool: &SqlitePool) -> AppResult<std::collections::HashMap<String, String>> {
-    let projects: Vec<(String, String)> =
-        sqlx::query_as("SELECT id, root_relative_path FROM projects")
+#[derive(Clone)]
+struct ProjectMapEntry {
+    id: String,
+    root_id: String,
+    rel: String,
+}
+
+async fn load_projects(pool: &SqlitePool) -> AppResult<Vec<ProjectMapEntry>> {
+    let rows: Vec<(String, String, String)> =
+        sqlx::query_as("SELECT id, authorized_root_id, root_relative_path FROM projects")
             .fetch_all(pool)
             .await?;
-    Ok(projects.into_iter().map(|(id, rel)| (rel, id)).collect())
+    Ok(rows
+        .into_iter()
+        .map(|(id, root_id, rel)| ProjectMapEntry { id, root_id, rel })
+        .collect())
+}
+
+fn match_project<'a>(
+    projects: &'a [ProjectMapEntry],
+    root_id: &str,
+    rel: &str,
+) -> Option<&'a ProjectMapEntry> {
+    let mut best: Option<&ProjectMapEntry> = None;
+    for p in projects {
+        if p.root_id != root_id {
+            continue;
+        }
+        if rel == p.rel || rel.starts_with(&(p.rel.clone() + "/")) {
+            let better = best
+                .map(|b| p.rel.len() > b.rel.len())
+                .unwrap_or(true);
+            if better {
+                best = Some(p);
+            }
+        }
+    }
+    best
+}
+
+fn category_for_project_rel(project_rel: &str, file_rel_under_root: &str) -> Option<String> {
+    let rest = file_rel_under_root
+        .strip_prefix(project_rel)
+        .map(|s| s.trim_start_matches('/'))
+        .unwrap_or("");
+    if rest.is_empty() {
+        return None;
+    }
+    infer_category_key_flexible(rest).map(|s| s.to_string())
 }
 
 pub async fn upsert_path(pool: &SqlitePool, root: &Path, path: &Path) -> AppResult<()> {
@@ -67,12 +103,18 @@ pub async fn upsert_path(pool: &SqlitePool, root: &Path, path: &Path) -> AppResu
         return Ok(());
     }
 
+    // Resolve root id
+    let root_id = match project_paths::find_root_for_path(pool, root).await? {
+        Some((r, _, _)) => r.id,
+        None => return Ok(()),
+    };
+
     if !path.exists() {
-        // Mark unavailable — keep history
         sqlx::query(
             "UPDATE indexed_files SET is_available = 0, indexed_at = datetime('now')
-             WHERE relative_path = ?",
+             WHERE authorized_root_id = ? AND relative_path = ?",
         )
+        .bind(&root_id)
         .bind(&rel)
         .execute(pool)
         .await?;
@@ -81,14 +123,10 @@ pub async fn upsert_path(pool: &SqlitePool, root: &Path, path: &Path) -> AppResu
 
     let meta = std::fs::metadata(path)?;
     let is_dir = meta.is_dir();
-    let project_map = project_map(pool).await?;
-    let project_code = rel.split('/').next().unwrap_or("").to_string();
-    let project_id = project_map.get(&project_code).cloned();
-    let category_key = if let Some(rest) = rel.strip_prefix(&format!("{project_code}/")) {
-        infer_category_key(rest).map(|s| s.to_string())
-    } else {
-        None
-    };
+    let projects = load_projects(pool).await?;
+    let project = match_project(&projects, &root_id, &rel);
+    let project_id = project.map(|p| p.id.clone());
+    let category_key = project.and_then(|p| category_for_project_rel(&p.rel, &rel));
     let extension = if is_dir {
         None
     } else {
@@ -100,10 +138,10 @@ pub async fn upsert_path(pool: &SqlitePool, root: &Path, path: &Path) -> AppResu
 
     sqlx::query(
         "INSERT INTO indexed_files (
-            id, project_id, relative_path, absolute_path, file_name, extension,
+            id, project_id, authorized_root_id, relative_path, absolute_path, file_name, extension,
             size_bytes, modified_at, is_directory, is_available, category_key, indexed_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, datetime('now'))
-         ON CONFLICT(relative_path) DO UPDATE SET
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, datetime('now'))
+         ON CONFLICT(authorized_root_id, relative_path) DO UPDATE SET
             project_id = excluded.project_id,
             absolute_path = excluded.absolute_path,
             file_name = excluded.file_name,
@@ -117,6 +155,7 @@ pub async fn upsert_path(pool: &SqlitePool, root: &Path, path: &Path) -> AppResu
     )
     .bind(Uuid::new_v4().to_string())
     .bind(&project_id)
+    .bind(&root_id)
     .bind(&rel)
     .bind(path.display().to_string())
     .bind(&name)
@@ -145,13 +184,18 @@ pub async fn remove_or_mark_unavailable(
         Ok(r) => r.to_string_lossy().replace('\\', "/"),
         Err(_) => return Ok(()),
     };
+    let root_id = match project_paths::find_root_for_path(pool, root).await? {
+        Some((r, _, _)) => r.id,
+        None => return Ok(()),
+    };
     if abs.exists() {
         upsert_path(pool, root, &abs).await?;
     } else {
         sqlx::query(
             "UPDATE indexed_files SET is_available = 0, indexed_at = datetime('now')
-             WHERE relative_path = ? OR relative_path LIKE ?",
+             WHERE authorized_root_id = ? AND (relative_path = ? OR relative_path LIKE ?)",
         )
+        .bind(&root_id)
         .bind(&rel)
         .bind(format!("{rel}/%"))
         .execute(pool)
@@ -186,14 +230,24 @@ pub async fn refresh_subtree(pool: &SqlitePool, root: &Path, dir: &Path) -> AppR
 
 pub async fn reconcile_paths(pool: &SqlitePool, root: &Path, paths: &[PathBuf]) -> AppResult<()> {
     for path in paths {
+        // If path is under a different authorized root, resolve that root
+        let effective_root = if path_is_under(root, path) || (!path.exists() && path.starts_with(root))
+        {
+            root.to_path_buf()
+        } else if let Some((_, rpath, _)) = project_paths::find_root_for_path(pool, path).await? {
+            rpath
+        } else {
+            root.to_path_buf()
+        };
+
         if path.exists() {
             if path.is_dir() {
-                refresh_subtree(pool, root, path).await?;
+                refresh_subtree(pool, &effective_root, path).await?;
             } else {
-                upsert_path(pool, root, path).await?;
+                upsert_path(pool, &effective_root, path).await?;
             }
         } else {
-            remove_or_mark_unavailable(pool, root, path).await?;
+            remove_or_mark_unavailable(pool, &effective_root, path).await?;
         }
     }
     Ok(())

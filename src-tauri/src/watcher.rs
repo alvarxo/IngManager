@@ -22,17 +22,32 @@ pub fn start_root_watcher(
     root: PathBuf,
     indexing: Arc<RwLock<bool>>,
 ) -> Result<WatcherHandle, String> {
+    start_roots_watcher(app, pool, vec![root], indexing)
+}
+
+pub fn start_roots_watcher(
+    app: AppHandle,
+    pool: SqlitePool,
+    roots: Vec<PathBuf>,
+    indexing: Arc<RwLock<bool>>,
+) -> Result<WatcherHandle, String> {
+    if roots.is_empty() {
+        return Err("No authorized roots to watch".into());
+    }
     let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
     let mut watcher = notify::recommended_watcher(tx).map_err(|e| e.to_string())?;
-    watcher
-        .watch(&root, RecursiveMode::Recursive)
-        .map_err(|e| e.to_string())?;
+    for root in &roots {
+        watcher
+            .watch(root, RecursiveMode::Recursive)
+            .map_err(|e| e.to_string())?;
+    }
 
     let pending: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
     let pending_clone = pending.clone();
-    let root_clone = root.clone();
+    let roots_clone = roots.clone();
+    // Primary root used as fallback for reconcile when path matching fails
+    let primary = roots[0].clone();
 
-    // Debounce aggregator thread
     std::thread::spawn(move || {
         let mut last_event = Instant::now();
         loop {
@@ -40,7 +55,7 @@ pub fn start_root_watcher(
                 Ok(Ok(event)) => {
                     if let Ok(mut set) = pending_clone.lock() {
                         for path in event.paths {
-                            if should_ignore(&root_clone, &path) {
+                            if roots_clone.iter().any(|r| should_ignore(r, &path)) {
                                 continue;
                             }
                             set.insert(path);
@@ -64,11 +79,10 @@ pub fn start_root_watcher(
                         }
 
                         let pool = pool.clone();
-                        let root = root_clone.clone();
+                        let root = primary.clone();
                         let app = app.clone();
                         let indexing = indexing.clone();
                         tauri::async_runtime::spawn(async move {
-                            // Skip while full index running
                             if *indexing.read().await {
                                 return;
                             }

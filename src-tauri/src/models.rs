@@ -3,13 +3,18 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Project {
     pub id: String,
-    pub code: String,
+    /// Optional business code (AANN or custom). Independent of physical path.
+    pub code: Option<String>,
     pub name: String,
     pub description: Option<String>,
     pub client_id: Option<String>,
     pub client_name: Option<String>,
     pub status: String,
+    pub authorized_root_id: String,
+    /// Path relative to the authorized root — independent of `code`.
     pub root_relative_path: String,
+    pub import_mode: String,
+    pub layout_mode: String,
     pub start_date: Option<String>,
     pub end_date: Option<String>,
     pub is_favorite: i64,
@@ -25,6 +30,14 @@ pub struct CreateProjectInput {
     pub client_name: Option<String>,
     pub start_date: Option<String>,
     pub end_date: Option<String>,
+    /// Optional business code. Empty/null → no code.
+    pub code: Option<String>,
+    /// Physical folder name under the chosen root (defaults to code or sanitized name).
+    pub folder_name: Option<String>,
+    /// Authorized root id (defaults to primary).
+    pub authorized_root_id: Option<String>,
+    /// Create standard physical folders (default true).
+    pub create_standard_folders: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +65,7 @@ pub struct CategorySummary {
 pub struct IndexedFile {
     pub id: String,
     pub project_id: Option<String>,
+    pub authorized_root_id: Option<String>,
     pub relative_path: String,
     pub absolute_path: String,
     pub file_name: String,
@@ -70,6 +84,7 @@ pub struct AppStatus {
     pub root_valid: bool,
     pub project_count: i64,
     pub db_path: String,
+    pub authorized_roots: Vec<crate::project_paths::AuthorizedRoot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

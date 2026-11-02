@@ -7,11 +7,11 @@ use tauri::State;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-use crate::db;
 use crate::doc_codes::next_transmission_code;
 use crate::error::{AppError, AppResult};
 use crate::fs_util::copy_recursively;
 use crate::path_security::{ensure_under_root, join_under_root};
+use crate::project_paths::{self, ProjectLocation};
 use crate::state::AppState;
 use crate::zip_safe::{create_zip_from_dir, extract_zip_safe, sha256_file};
 
@@ -109,26 +109,34 @@ pub struct ImportReceivedInput {
     pub link_to_sent_id: Option<String>,
 }
 
-async fn require_root(state: &AppState) -> AppResult<PathBuf> {
-    let root = db::get_setting(&state.pool, "root_path")
-        .await?
-        .ok_or_else(|| AppError::msg("Configure la carpeta raíz antes de continuar"))?;
-    let path = PathBuf::from(&root);
-    if !path.is_dir() {
-        return Err(AppError::msg(
-            "La carpeta raíz configurada no es accesible",
-        ));
-    }
-    Ok(path)
+async fn project_loc(state: &AppState, project_id: &str) -> AppResult<ProjectLocation> {
+    project_paths::resolve_project_location(&state.pool, project_id).await
 }
 
-async fn project_code(state: &AppState, project_id: &str) -> AppResult<String> {
-    let row: (String,) = sqlx::query_as("SELECT code FROM projects WHERE id = ?")
-        .bind(project_id)
-        .fetch_optional(&state.pool)
-        .await?
-        .ok_or_else(|| AppError::msg("Proyecto no encontrado"))?;
-    Ok(row.0)
+async fn tx_folder_base(state: &AppState, loc: &ProjectLocation) -> AppResult<String> {
+    let cat: Option<(String,)> = sqlx::query_as(
+        "SELECT relative_path FROM categories WHERE project_id = ? AND key = 'transmisiones'",
+    )
+    .bind(&loc.project_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let tx_rel = cat
+        .map(|c| c.0)
+        .unwrap_or_else(|| "06_TRANSMISIONES".into());
+    Ok(format!("{}/{}", loc.root_relative_path, tx_rel))
+}
+
+async fn antecedentes_base(state: &AppState, loc: &ProjectLocation) -> AppResult<String> {
+    let cat: Option<(String,)> = sqlx::query_as(
+        "SELECT relative_path FROM categories WHERE project_id = ? AND key = 'antecedentes'",
+    )
+    .bind(&loc.project_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let ant_rel = cat
+        .map(|c| c.0)
+        .unwrap_or_else(|| "01_ANTECEDENTES".into());
+    Ok(format!("{}/{}", loc.root_relative_path, ant_rel))
 }
 
 async fn existing_tx_codes(state: &AppState, project_id: &str) -> AppResult<Vec<String>> {
@@ -234,9 +242,9 @@ pub async fn preview_next_transmission_code(
     project_id: String,
     kind: String,
 ) -> AppResult<String> {
-    let code = project_code(&state, &project_id).await?;
+    let loc = project_loc(&state, &project_id).await?;
     let existing = existing_tx_codes(&state, &project_id).await?;
-    next_transmission_code(&code, &kind, &existing)
+    next_transmission_code(&loc.business_code_prefix, &kind, &existing)
 }
 
 #[tauri::command]
@@ -244,18 +252,18 @@ pub async fn preview_sent_transmission(
     state: State<'_, AppState>,
     input: CreateSentTransmissionInput,
 ) -> AppResult<PreviewSentResult> {
-    let root = require_root(&state).await?;
-    let pcode = project_code(&state, &input.project_id).await?;
+    let loc = project_loc(&state, &input.project_id).await?;
     let existing = existing_tx_codes(&state, &input.project_id).await?;
-    let code = next_transmission_code(&pcode, "ENV", &existing)?;
+    let code = next_transmission_code(&loc.business_code_prefix, "ENV", &existing)?;
     let date = input.sent_at.clone().unwrap_or_else(today_iso);
-    let folder_rel = format!("{pcode}/06_TRANSMISIONES/ENVIADOS/{date}/{code}");
+    let tx_base = tx_folder_base(&state, &loc).await?;
+    let folder_rel = format!("{tx_base}/ENVIADOS/{date}/{code}");
 
     let mut items = Vec::new();
     let mut all_ok = true;
     for it in &input.items {
         let path = PathBuf::from(&it.absolute_path);
-        let under = ensure_under_root(&root, &path);
+        let under = ensure_under_root(&loc.root_path, &path);
         let available = under.as_ref().map(|p| p.is_file()).unwrap_or(false);
         let file_name = path
             .file_name()
@@ -305,7 +313,8 @@ pub async fn create_sent_transmission(
         return Err(AppError::msg("Debe incluir al menos un archivo/documento"));
     }
 
-    let root = require_root(&state).await?;
+    let loc = project_loc(&state, &input.project_id).await?;
+    let root = loc.root_path.clone();
     let preview = preview_sent_transmission(state.clone(), input.clone()).await?;
     if !preview.all_available {
         return Err(AppError::msg(
@@ -498,17 +507,18 @@ pub async fn import_received_transmission(
     if input.counterpart.trim().is_empty() {
         return Err(AppError::msg("El remitente es obligatorio"));
     }
-    let root = require_root(&state).await?;
+    let loc = project_loc(&state, &input.project_id).await?;
+    let root = loc.root_path.clone();
     let source = PathBuf::from(&input.source_path);
     if !source.exists() {
         return Err(AppError::msg("La ruta de origen no existe"));
     }
 
-    let pcode = project_code(&state, &input.project_id).await?;
     let existing = existing_tx_codes(&state, &input.project_id).await?;
-    let code = next_transmission_code(&pcode, "REC", &existing)?;
+    let code = next_transmission_code(&loc.business_code_prefix, "REC", &existing)?;
     let date = input.received_at.clone().unwrap_or_else(today_iso);
-    let folder_rel = format!("{pcode}/06_TRANSMISIONES/RECIBIDOS/{date}/{code}");
+    let tx_base = tx_folder_base(&state, &loc).await?;
+    let folder_rel = format!("{tx_base}/RECIBIDOS/{date}/{code}");
     let folder = join_under_root(&root, &folder_rel)?;
 
     if folder.exists() {
@@ -588,9 +598,10 @@ pub async fn import_received_transmission(
 
     let mut antecedentes_rel = None;
     if input.extract_to_antecedentes.unwrap_or(true) && !extracted_files.is_empty() {
+        let ant_base = antecedentes_base(&state, &loc).await?;
         let ant = join_under_root(
             &root,
-            &format!("{pcode}/01_ANTECEDENTES/RECIBIDOS/{date}/{code}"),
+            &format!("{ant_base}/RECIBIDOS/{date}/{code}"),
         )?;
         if let Err(e) = fs::create_dir_all(&ant) {
             cleanup(&folder);
@@ -783,12 +794,12 @@ pub async fn open_transmission_folder(
     state: State<'_, AppState>,
     transmission_id: String,
 ) -> AppResult<()> {
-    let root = require_root(&state).await?;
     let tx = fetch_transmission(&state, &transmission_id).await?;
+    let loc = project_loc(&state, &tx.project_id).await?;
     let rel = tx
         .folder_relative_path
         .ok_or_else(|| AppError::msg("La transmisión no tiene carpeta registrada"))?;
-    let path = join_under_root(&root, &rel)?;
+    let path = join_under_root(&loc.root_path, &rel)?;
     if !path.is_dir() {
         return Err(AppError::msg("La carpeta de transmisión no existe"));
     }

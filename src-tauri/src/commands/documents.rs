@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 use uuid::Uuid;
 
-use crate::db;
 use crate::doc_codes::{next_document_code, type_code_for_category, version_label};
 use crate::error::{AppError, AppResult};
 use crate::path_security::{ensure_under_root, join_under_root};
@@ -144,16 +143,17 @@ pub struct AttachFileInput {
 }
 
 async fn require_root(state: &AppState) -> AppResult<PathBuf> {
-    let root = db::get_setting(&state.pool, "root_path")
-        .await?
-        .ok_or_else(|| AppError::msg("Configure la carpeta raíz antes de continuar"))?;
-    let path = PathBuf::from(&root);
-    if !path.is_dir() {
-        return Err(AppError::msg(
-            "La carpeta raíz configurada no es accesible",
-        ));
-    }
-    Ok(path)
+    crate::project_paths::require_primary_root_path(&state.pool).await
+}
+
+async fn project_business_prefix(state: &AppState, project_id: &str) -> AppResult<String> {
+    let loc = crate::project_paths::resolve_project_location(&state.pool, project_id).await?;
+    Ok(loc.business_code_prefix)
+}
+
+async fn root_for_project(state: &AppState, project_id: &str) -> AppResult<PathBuf> {
+    let loc = crate::project_paths::resolve_project_location(&state.pool, project_id).await?;
+    Ok(loc.root_path)
 }
 
 fn fingerprint(path: &Path) -> AppResult<String> {
@@ -347,18 +347,14 @@ pub async fn preview_next_document_code(
         Some(t) => t,
         None => return Ok(None),
     };
-    let project: (String,) = sqlx::query_as("SELECT code FROM projects WHERE id = ?")
-        .bind(&project_id)
-        .fetch_optional(&state.pool)
-        .await?
-        .ok_or_else(|| AppError::msg("Proyecto no encontrado"))?;
+    let prefix = project_business_prefix(&state, &project_id).await?;
     let rows: Vec<(Option<String>,)> =
         sqlx::query_as("SELECT business_code FROM documents WHERE project_id = ?")
             .bind(&project_id)
             .fetch_all(&state.pool)
             .await?;
     let codes: Vec<String> = rows.into_iter().filter_map(|r| r.0).collect();
-    Ok(Some(next_document_code(&project.0, type_code, &codes)?))
+    Ok(Some(next_document_code(&prefix, type_code, &codes)?))
 }
 
 #[tauri::command]
@@ -371,12 +367,8 @@ pub async fn create_document(
         return Err(AppError::msg("El título es obligatorio"));
     }
 
-    let root = require_root(&state).await?;
-    let project: (String,) = sqlx::query_as("SELECT code FROM projects WHERE id = ?")
-        .bind(&input.project_id)
-        .fetch_optional(&state.pool)
-        .await?
-        .ok_or_else(|| AppError::msg("Proyecto no encontrado"))?;
+    let root = root_for_project(&state, &input.project_id).await?;
+    let prefix = project_business_prefix(&state, &input.project_id).await?;
 
     let category: (String, String) = sqlx::query_as(
         "SELECT id, key FROM categories WHERE project_id = ? AND key = ?",
@@ -417,7 +409,7 @@ pub async fn create_document(
                 .fetch_all(&state.pool)
                 .await?;
         let codes: Vec<String> = rows.into_iter().filter_map(|r| r.0).collect();
-        Some(next_document_code(&project.0, tc, &codes)?)
+        Some(next_document_code(&prefix, tc, &codes)?)
     } else {
         None
     };

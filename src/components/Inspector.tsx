@@ -101,7 +101,7 @@ export function Inspector() {
                 <div className="space-y-4">
                   <div>
                     <div className="font-mono text-[15px] font-semibold text-accent">
-                      {project.data.code}
+                      {project.data.code ?? "—"}
                     </div>
                     <div className="text-[15px] font-medium">
                       {project.data.name}

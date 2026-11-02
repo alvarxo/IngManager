@@ -13,6 +13,7 @@ mod models;
 mod path_security;
 mod state;
 mod watcher;
+mod zip_safe;
 
 use state::AppState;
 use tauri::Manager;
@@ -66,6 +67,16 @@ pub fn run() {
             commands::documents::list_subcategories,
             commands::documents::create_subcategory,
             commands::documents::list_document_relationships,
+            commands::transmissions::list_transmissions,
+            commands::transmissions::get_transmission,
+            commands::transmissions::list_transmission_items,
+            commands::transmissions::preview_next_transmission_code,
+            commands::transmissions::preview_sent_transmission,
+            commands::transmissions::create_sent_transmission,
+            commands::transmissions::import_received_transmission,
+            commands::transmissions::link_transmissions,
+            commands::transmissions::list_transmission_links,
+            commands::transmissions::open_transmission_folder,
             commands::file_manager::list_directory,
             commands::file_manager::resolve_project_category_path,
             commands::file_manager::create_folder,

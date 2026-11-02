@@ -31,6 +31,7 @@ mod tests {
             "transmissions",
             "document_subcategories",
             "revisions",
+            "transmission_links",
         ] {
             let _: (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM {table}"))
                 .fetch_one(&pool)

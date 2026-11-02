@@ -243,3 +243,89 @@ export interface AttachFileInput {
   format_label?: string | null;
   revision_id?: string | null;
 }
+
+export interface TransmissionRow {
+  id: string;
+  project_id: string;
+  direction: "sent" | "received" | string;
+  code: string | null;
+  subject: string | null;
+  counterpart: string | null;
+  sent_at: string | null;
+  notes: string | null;
+  created_at: string;
+  medium: string | null;
+  status: string;
+  folder_relative_path: string | null;
+  zip_relative_path: string | null;
+  zip_checksum: string | null;
+  linked_transmission_id: string | null;
+  original_import_relative_path: string | null;
+  extracted_relative_path: string | null;
+  antecedentes_relative_path: string | null;
+  item_count: number;
+}
+
+export interface TransmissionItemRow {
+  id: string;
+  transmission_id: string;
+  document_id: string | null;
+  relative_path: string | null;
+  file_name: string | null;
+  created_at: string;
+  document_version_id: string | null;
+  checksum: string | null;
+  snapshot_relative_path: string | null;
+  is_available: number;
+}
+
+export interface TransmissionLinkRow {
+  id: string;
+  sent_transmission_id: string;
+  received_transmission_id: string;
+  notes: string | null;
+  created_at: string;
+}
+
+export interface SendItemInput {
+  document_id?: string | null;
+  document_version_id?: string | null;
+  absolute_path: string;
+}
+
+export interface CreateSentTransmissionInput {
+  project_id: string;
+  counterpart: string;
+  subject: string;
+  medium?: string | null;
+  notes?: string | null;
+  sent_at?: string | null;
+  items: SendItemInput[];
+}
+
+export interface PreviewSentItem {
+  absolute_path: string;
+  file_name: string;
+  available: boolean;
+  document_id: string | null;
+  document_version_id: string | null;
+  error: string | null;
+}
+
+export interface PreviewSentResult {
+  code: string;
+  folder_relative_path: string;
+  items: PreviewSentItem[];
+  all_available: boolean;
+}
+
+export interface ImportReceivedInput {
+  project_id: string;
+  counterpart: string;
+  subject?: string | null;
+  notes?: string | null;
+  received_at?: string | null;
+  source_path: string;
+  extract_to_antecedentes?: boolean | null;
+  link_to_sent_id?: string | null;
+}

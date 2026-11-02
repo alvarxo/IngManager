@@ -9,9 +9,22 @@ pub fn type_code_for_category(category_key: &str) -> Option<&'static str> {
         "antecedentes" => Some("ANT"),
         "admin" => Some("ADM"),
         "otros" => Some("OTR"),
-        "transmisiones" => None, // ENV/REC handled in Phase 4
+        "transmisiones" => None, // ENV/REC use next_transmission_code
         _ => None,
     }
+}
+
+/// Next transmission business code: `PROYECTO-ENV-NNN` or `PROYECTO-REC-NNN`.
+pub fn next_transmission_code(
+    project_code: &str,
+    kind: &str, // ENV | REC
+    existing_codes: &[String],
+) -> AppResult<String> {
+    let kind = kind.to_ascii_uppercase();
+    if kind != "ENV" && kind != "REC" {
+        return Err(AppError::msg("Tipo de transmisión debe ser ENV o REC"));
+    }
+    next_document_code(project_code, &kind, existing_codes)
 }
 
 /// Next `PROYECTO-TIPO-CORRELATIVO` (e.g. 2601-MOD-003).
@@ -78,5 +91,22 @@ mod tests {
         assert_eq!(type_code_for_category("planos"), Some("PL"));
         assert_eq!(type_code_for_category("memorias"), Some("MC"));
         assert_eq!(type_code_for_category("antecedentes"), Some("ANT"));
+    }
+
+    #[test]
+    fn env_rec_codes() {
+        assert_eq!(
+            next_transmission_code("2601", "ENV", &[]).unwrap(),
+            "2601-ENV-001"
+        );
+        assert_eq!(
+            next_transmission_code("2601", "REC", &["2601-ENV-001".into()]).unwrap(),
+            "2601-REC-001"
+        );
+        assert_eq!(
+            next_transmission_code("2601", "ENV", &["2601-ENV-001".into(), "2601-ENV-002".into()])
+                .unwrap(),
+            "2601-ENV-003"
+        );
     }
 }

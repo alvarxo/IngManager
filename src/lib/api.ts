@@ -7,6 +7,7 @@ import type {
   CreateDocumentInput,
   CreateProjectInput,
   CreateRevisionInput,
+  CreateSentTransmissionInput,
   CreateVersionInput,
   DocumentFileRow,
   DocumentRow,
@@ -14,11 +15,16 @@ import type {
   EntryProperties,
   FileOpResult,
   FsEntry,
+  ImportReceivedInput,
   IndexedFile,
+  PreviewSentResult,
   Project,
   RelationshipRow,
   RevisionRow,
   SubcategoryRow,
+  TransmissionItemRow,
+  TransmissionLinkRow,
+  TransmissionRow,
   TrashItem,
   UpdateDocumentInput,
   UpdateProjectInput,
@@ -193,4 +199,40 @@ export const api = {
     }),
   listDocumentRelationships: (documentId: string) =>
     invoke<RelationshipRow[]>("list_document_relationships", { documentId }),
+
+  listTransmissions: (projectId: string, direction?: string | null) =>
+    invoke<TransmissionRow[]>("list_transmissions", {
+      projectId,
+      direction: direction ?? null,
+    }),
+  getTransmission: (id: string) =>
+    invoke<TransmissionRow>("get_transmission", { id }),
+  listTransmissionItems: (transmissionId: string) =>
+    invoke<TransmissionItemRow[]>("list_transmission_items", {
+      transmissionId,
+    }),
+  previewNextTransmissionCode: (projectId: string, kind: string) =>
+    invoke<string>("preview_next_transmission_code", { projectId, kind }),
+  previewSentTransmission: (input: CreateSentTransmissionInput) =>
+    invoke<PreviewSentResult>("preview_sent_transmission", { input }),
+  createSentTransmission: (input: CreateSentTransmissionInput) =>
+    invoke<TransmissionRow>("create_sent_transmission", { input }),
+  importReceivedTransmission: (input: ImportReceivedInput) =>
+    invoke<TransmissionRow>("import_received_transmission", { input }),
+  linkTransmissions: (
+    sentId: string,
+    receivedId: string,
+    notes?: string | null,
+  ) =>
+    invoke<TransmissionLinkRow>("link_transmissions", {
+      sentId,
+      receivedId,
+      notes: notes ?? null,
+    }),
+  listTransmissionLinks: (transmissionId: string) =>
+    invoke<TransmissionLinkRow[]>("list_transmission_links", {
+      transmissionId,
+    }),
+  openTransmissionFolder: (transmissionId: string) =>
+    invoke<void>("open_transmission_folder", { transmissionId }),
 };

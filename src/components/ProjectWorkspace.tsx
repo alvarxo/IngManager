@@ -6,6 +6,7 @@ import { useUiStore } from "@/stores/ui-store";
 import { Button } from "./ui/button";
 import { FileManager } from "./FileManager";
 import { DocumentBrowser } from "./DocumentBrowser";
+import { TransmissionsPanel } from "./TransmissionsPanel";
 
 interface Props {
   projectId: string;
@@ -16,7 +17,12 @@ export function ProjectWorkspace({ projectId, categoryKey }: Props) {
   const setView = useUiStore((s) => s.setView);
   const projectContentMode = useUiStore((s) => s.projectContentMode);
   const setProjectContentMode = useUiStore((s) => s.setProjectContentMode);
+  const projectMainTab = useUiStore((s) => s.projectMainTab);
+  const setProjectMainTab = useUiStore((s) => s.setProjectMainTab);
   const setSelectedDocumentId = useUiStore((s) => s.setSelectedDocumentId);
+  const setSelectedTransmissionId = useUiStore(
+    (s) => s.setSelectedTransmissionId,
+  );
 
   const project = useQuery({
     queryKey: ["project", projectId],
@@ -74,88 +80,112 @@ export function ProjectWorkspace({ projectId, categoryKey }: Props) {
       </div>
 
       <div className="flex border-b border-border px-2">
-        {["Documentos", "Transmisiones", "Info", "Bitácora"].map((tab, i) => (
+        {(
+          [
+            ["documents", "Documentos", true],
+            ["transmissions", "Transmisiones", true],
+            ["info", "Info", false],
+            ["log", "Bitácora", false],
+          ] as const
+        ).map(([id, label, enabled]) => (
           <button
-            key={tab}
+            key={id}
             type="button"
-            disabled={i > 0}
-            title={i > 0 ? "Disponible en fases posteriores" : undefined}
+            disabled={!enabled}
+            title={!enabled ? "Disponible en fases posteriores" : undefined}
+            onClick={() => {
+              if (!enabled) return;
+              if (id === "documents" || id === "transmissions") {
+                setProjectMainTab(id);
+              }
+            }}
             className={cn(
               "h-[36px] px-3 text-[12.5px]",
-              i === 0
+              enabled &&
+                ((id === "documents" && projectMainTab === "documents") ||
+                  (id === "transmissions" && projectMainTab === "transmissions"))
                 ? "border-b-2 border-accent text-text"
-                : "cursor-not-allowed text-muted opacity-50",
+                : enabled
+                  ? "text-muted hover:text-text"
+                  : "cursor-not-allowed text-muted opacity-50",
             )}
           >
-            {tab}
+            {label}
           </button>
         ))}
-        <div className="ml-auto flex items-center gap-1 px-2">
-          <Button
-            size="sm"
-            variant={projectContentMode === "documents" ? "default" : "ghost"}
-            onClick={() => setProjectContentMode("documents")}
-          >
-            Lógicos
-          </Button>
-          <Button
-            size="sm"
-            variant={projectContentMode === "files" ? "default" : "ghost"}
-            onClick={() => {
-              setProjectContentMode("files");
-              setSelectedDocumentId(null);
-            }}
-          >
-            Archivos
-          </Button>
-        </div>
-      </div>
-
-      <div className="flex min-h-0 flex-1">
-        <div className="w-[200px] shrink-0 overflow-auto border-r border-border bg-panel">
-          <div className="px-3 py-2 text-[11px] font-semibold uppercase text-muted">
-            Categorías
+        {projectMainTab === "documents" && (
+          <div className="ml-auto flex items-center gap-1 px-2">
+            <Button
+              size="sm"
+              variant={projectContentMode === "documents" ? "default" : "ghost"}
+              onClick={() => setProjectContentMode("documents")}
+            >
+              Lógicos
+            </Button>
+            <Button
+              size="sm"
+              variant={projectContentMode === "files" ? "default" : "ghost"}
+              onClick={() => {
+                setProjectContentMode("files");
+                setSelectedDocumentId(null);
+              }}
+            >
+              Archivos
+            </Button>
           </div>
-          <ul>
-            {categories.data?.map((c) => (
-              <li key={c.key}>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSelectedDocumentId(null);
-                    setView({
-                      kind: "project",
-                      projectId,
-                      categoryKey: c.key,
-                    });
-                  }}
-                  className={cn(
-                    "flex h-[38px] w-full items-center justify-between px-3 text-left text-[12.5px]",
-                    activeKey === c.key
-                      ? "bg-selection text-text"
-                      : "text-muted hover:bg-elevated hover:text-text",
-                  )}
-                >
-                  <span>{c.name}</span>
-                  <span className="text-[11px] tabular-nums text-muted">
-                    {c.file_count}
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        </div>
-
-        {activeKey ? (
-          projectContentMode === "documents" ? (
-            <DocumentBrowser projectId={projectId} categoryKey={activeKey} />
-          ) : (
-            <FileManager projectId={projectId} categoryKey={activeKey} />
-          )
-        ) : (
-          <div className="p-4 text-muted">Sin categorías</div>
         )}
       </div>
+
+      {projectMainTab === "transmissions" ? (
+        <TransmissionsPanel projectId={projectId} />
+      ) : (
+        <div className="flex min-h-0 flex-1">
+          <div className="w-[200px] shrink-0 overflow-auto border-r border-border bg-panel">
+            <div className="px-3 py-2 text-[11px] font-semibold uppercase text-muted">
+              Categorías
+            </div>
+            <ul>
+              {categories.data?.map((c) => (
+                <li key={c.key}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedDocumentId(null);
+                      setSelectedTransmissionId(null);
+                      setView({
+                        kind: "project",
+                        projectId,
+                        categoryKey: c.key,
+                      });
+                    }}
+                    className={cn(
+                      "flex h-[38px] w-full items-center justify-between px-3 text-left text-[12.5px]",
+                      activeKey === c.key
+                        ? "bg-selection text-text"
+                        : "text-muted hover:bg-elevated hover:text-text",
+                    )}
+                  >
+                    <span>{c.name}</span>
+                    <span className="text-[11px] tabular-nums text-muted">
+                      {c.file_count}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          {activeKey ? (
+            projectContentMode === "documents" ? (
+              <DocumentBrowser projectId={projectId} categoryKey={activeKey} />
+            ) : (
+              <FileManager projectId={projectId} categoryKey={activeKey} />
+            )
+          ) : (
+            <div className="p-4 text-muted">Sin categorías</div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

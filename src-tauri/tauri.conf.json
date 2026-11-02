@@ -3,6 +3,7 @@
   "productName": "IngManager",
   "version": "0.1.0",
   "identifier": "com.ingmanager.app",
+  "mainBinaryName": "IngManager",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -27,14 +28,33 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
+    "category": "Productivity",
+    "shortDescription": "Gestión documental de proyectos de ingeniería",
+    "longDescription": "IngManager gestiona proyectos, documentos, versiones y transmisiones de ingeniería de forma local. Los datos de la aplicación se guardan en el perfil del usuario; la carpeta raíz de proyectos la elige usted y no se borra al desinstalar.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "startMenuFolder": "IngManager",
+        "languages": ["Spanish", "English"],
+        "displayLanguageSelector": false,
+        "compression": "lzma",
+        "installerHooks": "nsis/hooks.nsh"
+      }
+    }
   },
   "plugins": {}
 }

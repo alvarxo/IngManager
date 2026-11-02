@@ -144,7 +144,54 @@ pub async fn set_setting(pool: &SqlitePool, key: &str, value: &str) -> AppResult
     Ok(())
 }
 
+/// Persistent app database path under the **user profile**, never under the
+/// install directory (Windows Program Files / NSIS `$INSTDIR`).
+///
+/// Resolution order:
+/// 1. `%LOCALAPPDATA%\IngManager\ingmanager.db` (Windows) /
+///    `~/.local/share/IngManager/ingmanager.db` (Linux) when already present
+///    or as the preferred new location.
+/// 2. Legacy `…/ingmanager/ingmanager.db` if that file already exists
+///    (Phases 1–5 installs) so upgrades keep `root_path` and indexes.
 pub fn default_db_path() -> AppResult<PathBuf> {
-    let base = dirs::data_dir().ok_or_else(|| AppError::msg("No se pudo resolver data_dir"))?;
-    Ok(base.join("ingmanager").join("ingmanager.db"))
+    let base = dirs::data_local_dir()
+        .or_else(dirs::data_dir)
+        .ok_or_else(|| {
+            AppError::msg(
+                "No se pudo resolver el directorio de datos del usuario (LOCALAPPDATA/APPDATA)",
+            )
+        })?;
+
+    let preferred = base.join("IngManager").join("ingmanager.db");
+    let legacy = base.join("ingmanager").join("ingmanager.db");
+
+    if preferred.exists() {
+        return Ok(preferred);
+    }
+    if legacy.exists() {
+        return Ok(legacy);
+    }
+    // Brand-new installs write under the product folder (not CWD / install dir).
+    Ok(preferred)
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn db_path_is_under_user_data_not_cwd() {
+        let path = default_db_path().expect("data dir");
+        let cwd = std::env::current_dir().expect("cwd");
+        assert!(
+            !path.starts_with(&cwd.join("src-tauri")),
+            "DB must not live under the crate/install tree: {path:?}"
+        );
+        let s = path.to_string_lossy();
+        assert!(
+            s.contains("IngManager") || s.contains("ingmanager"),
+            "unexpected db path: {s}"
+        );
+        assert!(path.ends_with("ingmanager.db"));
+    }
 }

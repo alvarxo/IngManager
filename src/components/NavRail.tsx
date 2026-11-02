@@ -1,4 +1,12 @@
-import { Home, FolderKanban, Archive, Settings } from "lucide-react";
+import {
+  Home,
+  FolderKanban,
+  Archive,
+  Settings,
+  Inbox,
+  FolderTree,
+  GitBranch,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui-store";
 
@@ -22,6 +30,27 @@ export function NavRail() {
       icon: FolderKanban,
       active: view.kind === "project",
       onClick: () => setView({ kind: "home" }),
+    },
+    {
+      id: "inbox",
+      label: "Bandeja",
+      icon: Inbox,
+      active: view.kind === "inbox",
+      onClick: () => setView({ kind: "inbox" }),
+    },
+    {
+      id: "organizer",
+      label: "Organizador",
+      icon: FolderTree,
+      active: view.kind === "organizer",
+      onClick: () => setView({ kind: "organizer" }),
+    },
+    {
+      id: "pending-versions",
+      label: "Versiones",
+      icon: GitBranch,
+      active: view.kind === "pending-versions",
+      onClick: () => setView({ kind: "pending-versions" }),
     },
     {
       id: "archived",
@@ -65,7 +94,7 @@ export function NavRail() {
       </ul>
 
       <div className="mt-auto border-t border-border p-3 text-[11px] text-muted">
-        Fase 1 · Base documental
+        IngManager · organizador / bandeja / versiones
       </div>
     </nav>
   );

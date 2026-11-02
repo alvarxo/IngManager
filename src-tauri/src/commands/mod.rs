@@ -1,10 +1,13 @@
 pub mod audit_cmd;
+pub mod auto_version_cmd;
 pub mod backup;
 pub mod documents;
 pub mod file_manager;
 pub mod files;
 pub mod import_wizard;
+pub mod inbox_cmd;
 pub mod indexing;
+pub mod organizer;
 pub mod projects;
 pub mod search;
 pub mod settings;

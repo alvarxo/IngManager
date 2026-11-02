@@ -6,6 +6,9 @@ import { HomeView } from "./HomeView";
 import { ProjectWorkspace } from "./ProjectWorkspace";
 import { Inspector } from "./Inspector";
 import { SettingsView } from "./SettingsView";
+import { InboxView } from "./InboxView";
+import { OrganizerView } from "./OrganizerView";
+import { PendingVersionsView } from "./PendingVersionsView";
 import { useUiStore } from "@/stores/ui-store";
 
 interface Props {
@@ -31,6 +34,9 @@ export function AppShell({ rootPath, indexMessage }: Props) {
             <main className="h-full min-w-0">
               {view.kind === "home" && <HomeView />}
               {view.kind === "settings" && <SettingsView />}
+              {view.kind === "inbox" && <InboxView />}
+              {view.kind === "organizer" && <OrganizerView />}
+              {view.kind === "pending-versions" && <PendingVersionsView />}
               {view.kind === "project" && (
                 <ProjectWorkspace
                   projectId={view.projectId}

@@ -353,6 +353,8 @@ pub async fn open_project(state: State<'_, AppState>, id: String) -> AppResult<P
     .bind(&id)
     .execute(&state.pool)
     .await?;
+    // Reconcile Save-As / version patterns on open (best-effort).
+    let _ = crate::auto_version::reconcile_project(&state.pool, &id).await;
     fetch_project(&state, &id).await
 }
 

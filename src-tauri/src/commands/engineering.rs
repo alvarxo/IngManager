@@ -20,6 +20,7 @@ pub struct EngineeringGroupDto {
     pub title: String,
     pub principal_file_name: Option<String>,
     pub principal_absolute_path: Option<String>,
+    pub version_file_names: Vec<String>,
     pub auxiliary_count: usize,
     pub auxiliary_names: Vec<String>,
     pub standalone_names: Vec<String>,
@@ -137,6 +138,11 @@ fn to_dto(
         title: g.title,
         principal_file_name,
         principal_absolute_path,
+        version_file_names: g
+            .version_principals
+            .iter()
+            .map(|p| p.file_name.clone())
+            .collect(),
         auxiliary_count: g.auxiliaries.len(),
         auxiliary_names: g.auxiliaries.iter().map(|a| a.file_name.clone()).collect(),
         standalone_names: g.standalone.iter().map(|s| s.file_name.clone()).collect(),
@@ -221,14 +227,15 @@ pub async fn bulk_register_engineering_docs_inner(
         if !filter_keys.is_empty() && !filter_keys.contains(&g.group_key) {
             continue;
         }
-        let Some(principal) = g.principal.as_ref() else {
+        let principals = if g.version_principals.is_empty() {
+            g.principal.iter().cloned().collect::<Vec<_>>()
+        } else {
+            g.version_principals.clone()
+        };
+        if principals.is_empty() {
             skipped += 1;
             continue;
-        };
-        let Some(abs) = path_by_name.get(&principal.file_name) else {
-            skipped += 1;
-            continue;
-        };
+        }
 
         let existing: Option<(String,)> = sqlx::query_as(
             "SELECT id FROM engineering_groups
@@ -244,27 +251,53 @@ pub async fn bulk_register_engineering_docs_inner(
             continue;
         }
 
-        let under = ensure_under_root(&root, Path::new(abs))?;
-        let rel = under
-            .strip_prefix(&root)
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_default();
-        let linked: Option<(String,)> = sqlx::query_as(
-            "SELECT d.id FROM documents d
-             JOIN document_files f ON f.document_version_id = d.current_version_id
-             WHERE d.project_id = ? AND f.relative_path = ?",
-        )
-        .bind(&project_id)
-        .bind(&rel)
-        .fetch_optional(pool)
-        .await?;
-        if linked.is_some() {
+        // Resolve absolute paths; skip group if none exist on disk
+        let mut resolved: Vec<(crate::engineering_files::ClassifiedFile, String, String)> =
+            Vec::new();
+        for p in &principals {
+            let Some(abs) = path_by_name.get(&p.file_name) else {
+                continue;
+            };
+            let Ok(under) = ensure_under_root(&root, Path::new(abs)) else {
+                continue;
+            };
+            if !under.is_file() {
+                continue;
+            }
+            let rel = under
+                .strip_prefix(&root)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            resolved.push((p.clone(), abs.clone(), rel));
+        }
+        if resolved.is_empty() {
+            skipped += 1;
+            continue;
+        }
+
+        // Any principal already linked → skip whole group (avoid duplicate MOD codes)
+        let mut already_linked = false;
+        for (_, _, rel) in &resolved {
+            let linked: Option<(String,)> = sqlx::query_as(
+                "SELECT d.id FROM documents d
+                 JOIN document_files f ON f.document_version_id = d.current_version_id
+                 WHERE d.project_id = ? AND f.relative_path = ? AND f.is_available = 1",
+            )
+            .bind(&project_id)
+            .bind(rel)
+            .fetch_optional(pool)
+            .await?;
+            if linked.is_some() {
+                already_linked = true;
+                break;
+            }
+        }
+        if already_linked {
             skipped += 1;
             continue;
         }
 
         let doc_id = Uuid::new_v4().to_string();
-        let version_id = Uuid::new_v4().to_string();
         let title = g.title.clone();
         let business_code = if assign_codes {
             let prefix = loc.business_code_prefix.clone();
@@ -286,11 +319,12 @@ pub async fn bulk_register_engineering_docs_inner(
         };
 
         let mut tx = pool.begin().await?;
+        // Placeholder current_version_id; updated after first version insert
         sqlx::query(
             "INSERT INTO documents (
                 id, project_id, category_id, business_code, title, doc_type,
                 current_version_id, status, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'), datetime('now'))",
+             ) VALUES (?, ?, ?, ?, ?, ?, NULL, 'active', datetime('now'), datetime('now'))",
         )
         .bind(&doc_id)
         .bind(&project_id)
@@ -298,74 +332,107 @@ pub async fn bulk_register_engineering_docs_inner(
         .bind(&business_code)
         .bind(&title)
         .bind(crate::doc_codes::type_code_for_category(&category_key))
-        .bind(&version_id)
         .execute(&mut *tx)
         .await?;
 
-        sqlx::query(
-            "INSERT INTO document_versions (
-                id, document_id, version_number, label, notes, created_at,
-                is_snapshot, source_relative_path
-             ) VALUES (?, ?, 1, ?, NULL, datetime('now'), 0, ?)",
-        )
-        .bind(&version_id)
-        .bind(&doc_id)
-        .bind(crate::doc_codes::version_label(1))
-        .bind(&rel)
-        .execute(&mut *tx)
-        .await?;
+        let mut current_version_id = String::new();
+        let mut current_abs = String::new();
+        let mut display_principal_name = resolved
+            .last()
+            .map(|(p, _, _)| p.file_name.clone())
+            .unwrap_or_default();
 
-        let classified = classify_file_name(&principal.file_name, &codes);
-        let meta = std::fs::metadata(&under).ok();
-        let file_id = Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO document_files (
-                id, document_version_id, relative_path, file_name, extension,
-                size_bytes, modified_at, content_hash, is_available, format_label,
-                created_at, file_role, engineering_group_key
-             ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 1, 'principal', datetime('now'), ?, ?)",
-        )
-        .bind(&file_id)
-        .bind(&version_id)
-        .bind(&rel)
-        .bind(&principal.file_name)
-        .bind(&classified.extension)
-        .bind(meta.as_ref().map(|m| m.len() as i64))
-        .bind(FileRole::Principal.as_str())
-        .bind(&g.group_key)
-        .execute(&mut *tx)
-        .await?;
+        for (idx, (principal, abs, rel)) in resolved.iter().enumerate() {
+            let version_number = (idx as i64) + 1;
+            let version_id = Uuid::new_v4().to_string();
+            let hint = crate::engineering_files::version_hint_from_name(&principal.file_name);
+            let notes = hint
+                .as_ref()
+                .map(|h| format!("Registrado desde archivo (hint: {h})"));
 
-        for aux in &g.auxiliaries {
-            if let Some(aux_abs) = path_by_name.get(&aux.file_name) {
-                if let Ok(aux_path) = ensure_under_root(&root, Path::new(aux_abs)) {
-                    let aux_rel = aux_path
-                        .strip_prefix(&root)
-                        .map(|p| p.to_string_lossy().replace('\\', "/"))
-                        .unwrap_or_default();
-                    let aux_id = Uuid::new_v4().to_string();
-                    let aux_meta = std::fs::metadata(&aux_path).ok();
-                    let aux_c = classify_file_name(&aux.file_name, &codes);
-                    sqlx::query(
-                        "INSERT INTO document_files (
-                            id, document_version_id, relative_path, file_name, extension,
-                            size_bytes, modified_at, content_hash, is_available, format_label,
-                            created_at, file_role, engineering_group_key
-                         ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 1, 'auxiliary', datetime('now'), ?, ?)",
-                    )
-                    .bind(&aux_id)
-                    .bind(&version_id)
-                    .bind(&aux_rel)
-                    .bind(&aux.file_name)
-                    .bind(&aux_c.extension)
-                    .bind(aux_meta.as_ref().map(|m| m.len() as i64))
-                    .bind(FileRole::Auxiliary.as_str())
-                    .bind(&g.group_key)
-                    .execute(&mut *tx)
-                    .await?;
+            sqlx::query(
+                "INSERT INTO document_versions (
+                    id, document_id, version_number, label, notes, created_at,
+                    is_snapshot, source_relative_path
+                 ) VALUES (?, ?, ?, ?, ?, datetime('now'), 0, ?)",
+            )
+            .bind(&version_id)
+            .bind(&doc_id)
+            .bind(version_number)
+            .bind(crate::doc_codes::version_label(version_number))
+            .bind(&notes)
+            .bind(rel)
+            .execute(&mut *tx)
+            .await?;
+
+            let classified = classify_file_name(&principal.file_name, &codes);
+            let under = Path::new(abs);
+            let meta = std::fs::metadata(under).ok();
+            let file_id = Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO document_files (
+                    id, document_version_id, relative_path, file_name, extension,
+                    size_bytes, modified_at, content_hash, is_available, format_label,
+                    created_at, file_role, engineering_group_key
+                 ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 1, 'principal', datetime('now'), ?, ?)",
+            )
+            .bind(&file_id)
+            .bind(&version_id)
+            .bind(rel)
+            .bind(&principal.file_name)
+            .bind(&classified.extension)
+            .bind(meta.as_ref().map(|m| m.len() as i64))
+            .bind(FileRole::Principal.as_str())
+            .bind(&g.group_key)
+            .execute(&mut *tx)
+            .await?;
+
+            // Auxiliaries attach to the baseline (v01) only
+            if idx == 0 {
+                for aux in &g.auxiliaries {
+                    if let Some(aux_abs) = path_by_name.get(&aux.file_name) {
+                        if let Ok(aux_path) = ensure_under_root(&root, Path::new(aux_abs)) {
+                            let aux_rel = aux_path
+                                .strip_prefix(&root)
+                                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                                .unwrap_or_default();
+                            let aux_id = Uuid::new_v4().to_string();
+                            let aux_meta = std::fs::metadata(&aux_path).ok();
+                            let aux_c = classify_file_name(&aux.file_name, &codes);
+                            sqlx::query(
+                                "INSERT INTO document_files (
+                                    id, document_version_id, relative_path, file_name, extension,
+                                    size_bytes, modified_at, content_hash, is_available, format_label,
+                                    created_at, file_role, engineering_group_key
+                                 ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 1, 'auxiliary', datetime('now'), ?, ?)",
+                            )
+                            .bind(&aux_id)
+                            .bind(&version_id)
+                            .bind(&aux_rel)
+                            .bind(&aux.file_name)
+                            .bind(&aux_c.extension)
+                            .bind(aux_meta.as_ref().map(|m| m.len() as i64))
+                            .bind(FileRole::Auxiliary.as_str())
+                            .bind(&g.group_key)
+                            .execute(&mut *tx)
+                            .await?;
+                        }
+                    }
                 }
             }
+
+            current_version_id = version_id;
+            current_abs = abs.clone();
+            display_principal_name = principal.file_name.clone();
         }
+
+        sqlx::query(
+            "UPDATE documents SET current_version_id = ?, updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(&current_version_id)
+        .bind(&doc_id)
+        .execute(&mut *tx)
+        .await?;
 
         let eg_id = Uuid::new_v4().to_string();
         sqlx::query(
@@ -379,21 +446,25 @@ pub async fn bulk_register_engineering_docs_inner(
         .bind(&category_key)
         .bind(&g.group_key)
         .bind(&title)
-        .bind(&principal.file_name)
+        .bind(&display_principal_name)
         .bind(&doc_id)
         .execute(&mut *tx)
         .await?;
 
         tx.commit().await?;
 
-        let _ = crate::auto_version::register_baseline(
-            pool,
-            &project_id,
-            &doc_id,
-            Some(&version_id),
-            Path::new(abs),
-        )
-        .await;
+        // Baseline tracking for every linked principal (no file copy)
+        for (_, abs, _) in &resolved {
+            let _ = crate::auto_version::register_baseline(
+                pool,
+                &project_id,
+                &doc_id,
+                Some(&current_version_id),
+                Path::new(abs),
+            )
+            .await;
+        }
+        let _ = current_abs;
 
         created += 1;
         document_ids.push(doc_id);

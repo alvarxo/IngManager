@@ -52,6 +52,7 @@ import type {
   EngineeringGroupDto,
   BulkRegisterInput,
   BulkRegisterResult,
+  AvailabilityCleanupResult,
   UpdatePlanItemInput,
   OrganizerPlanItem,
   IncorporationPreviewInput,
@@ -247,6 +248,16 @@ export const api = {
       documentId,
       versionId,
       notes: notes ?? null,
+    }),
+  deleteLogicalDocument: (documentId: string) =>
+    invoke<void>("delete_logical_document", { documentId }),
+  cleanupDocumentAvailability: (
+    projectId: string,
+    deleteEmptyLogicals = true,
+  ) =>
+    invoke<AvailabilityCleanupResult>("cleanup_document_availability", {
+      projectId,
+      deleteEmptyLogicals,
     }),
   openDocumentFile: (fileId: string, useTempCopy?: boolean | null) =>
     invoke<string>("open_document_file", {

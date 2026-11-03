@@ -697,11 +697,18 @@ export interface EngineeringGroupDto {
   title: string;
   principal_file_name: string | null;
   principal_absolute_path: string | null;
+  version_file_names: string[];
   auxiliary_count: number;
   auxiliary_names: string[];
   standalone_names: string[];
   already_registered: boolean;
   document_id: string | null;
+}
+
+export interface AvailabilityCleanupResult {
+  marked_unavailable: number;
+  deleted_empty_documents: number;
+  document_ids_removed: string[];
 }
 
 export interface BulkRegisterInput {

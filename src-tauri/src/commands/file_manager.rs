@@ -625,6 +625,13 @@ pub async fn delete_to_trash(
         .execute(&state.pool)
         .await?;
 
+        // Avoid logical-document ghosts: mark linked rows unavailable (keep SQLite history)
+        let _ = crate::commands::documents::mark_document_files_unavailable_for_path(
+            &state.pool,
+            &original_rel,
+        )
+        .await;
+
         out.push(id);
     }
 

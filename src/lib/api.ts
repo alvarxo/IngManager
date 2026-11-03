@@ -291,6 +291,16 @@ export const api = {
     invoke<RevisionRow[]>("list_revisions", { documentId }),
   createRevision: (input: CreateRevisionInput) =>
     invoke<RevisionRow>("create_revision", { input }),
+  repairDocumentRevisions: (documentId: string) =>
+    invoke<{
+      document_id: string;
+      revisions_created: number;
+      files_reassigned: number;
+      empty_versions_removed: number;
+      current_revision_code: string | null;
+    }>("repair_document_revisions", {
+      input: { document_id: documentId },
+    }),
   listSubcategories: (projectId: string, categoryKey: string) =>
     invoke<SubcategoryRow[]>("list_subcategories", { projectId, categoryKey }),
   createSubcategory: (

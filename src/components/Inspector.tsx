@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Star, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
@@ -53,6 +54,38 @@ export function Inspector() {
     },
   });
 
+  const unarchiveMutation = useMutation({
+    mutationFn: () =>
+      api.updateProject({ id: projectId!, status: "active" }),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["projects"] });
+      await qc.invalidateQueries({ queryKey: ["project", projectId] });
+    },
+  });
+
+  const [editingProject, setEditingProject] = useState(false);
+  const [editName, setEditName] = useState("");
+  const [editClient, setEditClient] = useState("");
+  const [editDescription, setEditDescription] = useState("");
+  const [projectMetaError, setProjectMetaError] = useState<string | null>(null);
+
+  const projectMetaMutation = useMutation({
+    mutationFn: () =>
+      api.updateProject({
+        id: projectId!,
+        name: editName.trim() || undefined,
+        client_name: editClient.trim() || null,
+        description: editDescription.trim() || null,
+      }),
+    onSuccess: async () => {
+      setEditingProject(false);
+      setProjectMetaError(null);
+      await qc.invalidateQueries({ queryKey: ["project", projectId] });
+      await qc.invalidateQueries({ queryKey: ["projects"] });
+    },
+    onError: (e: Error) => setProjectMetaError(String(e)),
+  });
+
   const isDocTab = inspectorTab.startsWith("doc-");
 
   return (
@@ -103,22 +136,99 @@ export function Inspector() {
                     <div className="font-mono text-[15px] font-semibold text-accent">
                       {project.data.code ?? "—"}
                     </div>
-                    <div className="text-[15px] font-medium">
-                      {project.data.name}
-                    </div>
+                    {!editingProject ? (
+                      <div className="text-[15px] font-medium">
+                        {project.data.name}
+                      </div>
+                    ) : null}
                   </div>
-                  <Meta label="Cliente" value={project.data.client_name ?? "—"} />
-                  <Meta label="Estado" value={project.data.status} />
-                  <Meta
-                    label="Ruta"
-                    value={project.data.root_relative_path}
-                    mono
-                  />
-                  <Meta
-                    label="Descripción"
-                    value={project.data.description ?? "—"}
-                  />
+                  {!editingProject ? (
+                    <>
+                      <Meta label="Cliente" value={project.data.client_name ?? "—"} />
+                      <Meta label="Estado" value={project.data.status} />
+                      <Meta
+                        label="Ruta"
+                        value={project.data.root_relative_path}
+                        mono
+                      />
+                      <Meta
+                        label="Descripción"
+                        value={project.data.description ?? "—"}
+                      />
+                      <p className="text-[11px] text-muted">
+                        La ruta física no cambia al editar metadatos.
+                      </p>
+                    </>
+                  ) : (
+                    <div className="space-y-2">
+                      <label className="block">
+                        <div className="mb-1 text-[11px] uppercase text-muted">Nombre</div>
+                        <input
+                          className="h-[32px] w-full border border-border bg-elevated px-2 text-[13px]"
+                          value={editName}
+                          onChange={(e) => setEditName(e.target.value)}
+                        />
+                      </label>
+                      <label className="block">
+                        <div className="mb-1 text-[11px] uppercase text-muted">Cliente</div>
+                        <input
+                          className="h-[32px] w-full border border-border bg-elevated px-2 text-[13px]"
+                          value={editClient}
+                          onChange={(e) => setEditClient(e.target.value)}
+                        />
+                      </label>
+                      <label className="block">
+                        <div className="mb-1 text-[11px] uppercase text-muted">Descripción</div>
+                        <textarea
+                          className="min-h-[64px] w-full border border-border bg-elevated px-2 py-1 text-[13px]"
+                          value={editDescription}
+                          onChange={(e) => setEditDescription(e.target.value)}
+                        />
+                      </label>
+                      <Meta
+                        label="Ruta (solo lectura)"
+                        value={project.data.root_relative_path}
+                        mono
+                      />
+                      {projectMetaError && (
+                        <div className="border border-error/40 bg-error/10 px-2 py-1.5 text-[12px] text-error">
+                          {projectMetaError}
+                        </div>
+                      )}
+                      <div className="flex flex-wrap gap-1">
+                        <Button
+                          size="sm"
+                          disabled={projectMetaMutation.isPending}
+                          onClick={() => projectMetaMutation.mutate()}
+                        >
+                          Guardar
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => setEditingProject(false)}
+                        >
+                          Cancelar
+                        </Button>
+                      </div>
+                    </div>
+                  )}
                   <div className="flex flex-wrap gap-2 pt-2">
+                    {!editingProject && (
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => {
+                          setEditName(project.data!.name);
+                          setEditClient(project.data!.client_name ?? "");
+                          setEditDescription(project.data!.description ?? "");
+                          setProjectMetaError(null);
+                          setEditingProject(true);
+                        }}
+                      >
+                        Editar metadatos…
+                      </Button>
+                    )}
                     <Button
                       variant="secondary"
                       size="sm"
@@ -148,6 +258,15 @@ export function Inspector() {
                         onClick={() => archiveMutation.mutate()}
                       >
                         Archivar
+                      </Button>
+                    )}
+                    {project.data.status === "archived" && (
+                      <Button
+                        size="sm"
+                        disabled={unarchiveMutation.isPending}
+                        onClick={() => unarchiveMutation.mutate()}
+                      >
+                        Desarchivar
                       </Button>
                     )}
                   </div>

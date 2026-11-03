@@ -174,6 +174,45 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
     });
   }
 
+  async function renameSubcategory(id: string, current: string) {
+    const name = window.prompt("Renombrar subcategoría", current);
+    if (!name || name.trim() === current) return;
+    try {
+      await api.updateSubcategory(id, name);
+      await qc.invalidateQueries({
+        queryKey: ["subcategories", projectId, categoryKey],
+      });
+      await qc.invalidateQueries({ queryKey: ["documents", projectId, categoryKey] });
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function removeSubcategory(id: string, name: string) {
+    if (!window.confirm(`¿Eliminar subcategoría «${name}»? Los documentos no se borran.`)) {
+      return;
+    }
+    try {
+      await api.deleteSubcategory(id);
+      await qc.invalidateQueries({
+        queryKey: ["subcategories", projectId, categoryKey],
+      });
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function openLogicalPrincipal(docId: string) {
+    try {
+      setError(null);
+      setSelectedDocumentId(docId);
+      setInspectorTab("doc-detail");
+      await api.openDocumentPrincipal(docId);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col">
       <div className="flex flex-wrap items-center gap-2 border-b border-border bg-panel px-3 py-1.5">
@@ -216,6 +255,35 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
           </Button>
         )}
       </div>
+      {categoryKey === "antecedentes" && (subcats.data?.length ?? 0) > 0 && (
+        <div className="flex flex-wrap items-center gap-1 border-b border-border bg-panel px-3 py-1">
+          <span className="mr-1 text-[11px] uppercase text-muted">Subcats:</span>
+          {subcats.data?.map((s) => (
+            <span
+              key={s.id}
+              className="inline-flex items-center gap-1 border border-border bg-elevated px-1.5 py-0.5 text-[11.5px]"
+            >
+              {s.name}
+              <button
+                type="button"
+                className="text-muted hover:text-text"
+                title="Renombrar"
+                onClick={() => renameSubcategory(s.id, s.name)}
+              >
+                ✎
+              </button>
+              <button
+                type="button"
+                className="text-muted hover:text-error"
+                title="Eliminar"
+                onClick={() => removeSubcategory(s.id, s.name)}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
 
       <div
         className="min-h-0 flex-1 overflow-auto"
@@ -267,7 +335,12 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
                     setInspectorTab("doc-detail");
                     setCtxMenu(null);
                   }}
+                  onDoubleClick={() => {
+                    setCtxMenu(null);
+                    void openLogicalPrincipal(d.id);
+                  }}
                   onContextMenu={(e) => onDocContextMenu(e, d)}
+                  title="Doble clic: abrir archivo principal (DOCX/DWG/SDB/RVT)"
                 >
                   <td className="px-3 font-mono text-[12px] text-accent">
                     {d.business_code ?? "—"}
@@ -324,6 +397,17 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
               }}
             >
               Abrir detalle
+            </button>
+            <button
+              type="button"
+              className="block w-full px-3 py-1.5 text-left text-[12.5px] hover:bg-elevated"
+              onClick={() => {
+                const id = ctxMenu.doc.id;
+                setCtxMenu(null);
+                void openLogicalPrincipal(id);
+              }}
+            >
+              Abrir archivo principal
             </button>
             <button
               type="button"

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import type { LogicalTreeExpandPolicy } from "@/lib/types";
 import { Button } from "./ui/button";
 import { ImportWizard } from "./ImportWizard";
 import { useUiStore } from "@/stores/ui-store";
@@ -13,6 +14,21 @@ export function SettingsView() {
   const status = useQuery({
     queryKey: ["app-status"],
     queryFn: () => api.getAppStatus(),
+  });
+
+  const treePolicy = useQuery({
+    queryKey: ["logical-tree-expand-policy"],
+    queryFn: () => api.getLogicalTreeExpandPolicy(),
+  });
+
+  const setTreePolicy = useMutation({
+    mutationFn: (policy: LogicalTreeExpandPolicy) =>
+      api.setLogicalTreeExpandPolicy(policy),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["logical-tree-expand-policy"] });
+      setMsg("Política de expansión del árbol de Lógicos actualizada.");
+    },
+    onError: (e: Error) => setMsg(String(e)),
   });
 
   const setRoot = useMutation({
@@ -190,6 +206,31 @@ export function SettingsView() {
           El backup usa VACUUM INTO (snapshot consistente), manifiesto JSON y
           copia de proyectos por su ruta física real + ZIP.
         </p>
+      </section>
+
+      <section className="mb-6 max-w-2xl border border-border bg-panel p-4">
+        <h2 className="mb-2 text-[13px] font-semibold">
+          Árbol de documentos lógicos
+        </h2>
+        <p className="mb-3 text-[12px] text-muted">
+          Cómo recordar nodos expandidos (documento / revisión / versión) al
+          volver a un proyecto. Expandir con el chevron no abre archivos.
+        </p>
+        <label className="block max-w-sm">
+          <div className="mb-1 text-[11.5px] text-muted">Al abrir Lógicos</div>
+          <select
+            className="h-[34px] w-full border border-border bg-elevated px-2.5 text-[13px]"
+            value={treePolicy.data ?? "remember"}
+            disabled={treePolicy.isLoading || setTreePolicy.isPending}
+            onChange={(e) =>
+              setTreePolicy.mutate(e.target.value as LogicalTreeExpandPolicy)
+            }
+          >
+            <option value="remember">Recordar expansión</option>
+            <option value="collapsed">Todo colapsado</option>
+            <option value="expanded">Todo expandido</option>
+          </select>
+        </label>
       </section>
 
       <section className="mb-6 max-w-2xl border border-border bg-panel p-4">

@@ -28,6 +28,9 @@ mod incorporation;
 #[cfg(test)]
 mod incorporation_tests;
 mod index_sync;
+mod logical_tree;
+#[cfg(test)]
+mod logical_tree_nav_tests;
 mod models;
 #[cfg(test)]
 mod organizer_inbox_tests;
@@ -98,7 +101,18 @@ pub fn run() {
             commands::documents::cleanup_document_availability,
             commands::documents::open_document_file,
             commands::documents::open_document_principal,
+            commands::documents::list_document_open_formats,
+            commands::documents::get_document_open_preference,
+            commands::documents::set_document_open_preference,
+            commands::documents::open_document_with_format,
+            commands::documents::list_revision_files,
             commands::documents::list_revisions,
+            commands::settings::get_app_setting,
+            commands::settings::set_app_setting,
+            commands::settings::get_logical_tree_expand_policy,
+            commands::settings::set_logical_tree_expand_policy,
+            commands::settings::get_logical_tree_expand_state,
+            commands::settings::set_logical_tree_expand_state,
             commands::documents::create_revision,
             commands::documents::repair_document_revisions,
             commands::documents::list_subcategories,

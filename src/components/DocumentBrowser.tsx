@@ -1,9 +1,34 @@
-import { useMemo, useState, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
-import { AlertTriangle, FilePlus2, Plus } from "lucide-react";
+import {
+  AlertTriangle,
+  ChevronDown,
+  ChevronRight,
+  FilePlus2,
+  Plus,
+} from "lucide-react";
 import { api } from "@/lib/api";
-import type { DocumentRow } from "@/lib/types";
+import {
+  categoryUsesRevisions,
+  expandedSetToRecord,
+  formatChipLabel,
+  initialExpandedKeys,
+  treeNodeKey,
+} from "@/lib/logical-tree";
+import type {
+  DocumentFileRow,
+  DocumentRow,
+  DocumentVersionRow,
+  RevisionRow,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui-store";
 import { Button } from "./ui/button";
@@ -15,10 +40,22 @@ interface Props {
 
 const MEMORIA_STATUSES = ["desarrollo", "revision", "aprobada", "obsoleta"];
 
+type CtxTarget =
+  | { kind: "doc"; doc: DocumentRow }
+  | { kind: "file"; doc: DocumentRow; file: DocumentFileRow };
+
 interface DocContextMenu {
   x: number;
   y: number;
-  doc: DocumentRow;
+  target: CtxTarget;
+  formats: string[];
+}
+
+interface FormatPickerState {
+  documentId: string;
+  formats: string[];
+  rememberOnChoose: boolean;
+  title: string;
 }
 
 export function DocumentBrowser({ projectId, categoryKey }: Props) {
@@ -41,11 +78,71 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
   const [sourcePath, setSourcePath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [ctxMenu, setCtxMenu] = useState<DocContextMenu | null>(null);
+  const [formatPicker, setFormatPicker] = useState<FormatPickerState | null>(
+    null,
+  );
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [expandReady, setExpandReady] = useState(false);
+  const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const usesRevisions = categoryUsesRevisions(categoryKey);
 
   const docs = useQuery({
     queryKey: ["documents", projectId, categoryKey],
     queryFn: () => api.listDocuments(projectId, categoryKey, true),
   });
+
+  const expandPolicy = useQuery({
+    queryKey: ["logical-tree-expand-policy"],
+    queryFn: () => api.getLogicalTreeExpandPolicy(),
+  });
+
+  const expandState = useQuery({
+    queryKey: ["logical-tree-expand-state", projectId],
+    queryFn: () => api.getLogicalTreeExpandState(projectId),
+  });
+
+  useEffect(() => {
+    if (!expandPolicy.data || expandState.isLoading) return;
+    const seed =
+      expandPolicy.data === "expanded"
+        ? (docs.data ?? []).map((d) => treeNodeKey("doc", d.id))
+        : [];
+    setExpanded(
+      initialExpandedKeys(expandPolicy.data, expandState.data ?? {}, seed),
+    );
+    setExpandReady(true);
+  }, [expandPolicy.data, expandState.data, expandState.isLoading, docs.data]);
+
+  const persistExpand = useCallback(
+    (next: Set<string>) => {
+      if (expandPolicy.data !== "remember") return;
+      if (persistTimer.current) clearTimeout(persistTimer.current);
+      persistTimer.current = setTimeout(() => {
+        void api
+          .setLogicalTreeExpandState(projectId, expandedSetToRecord(next))
+          .then(() =>
+            qc.invalidateQueries({
+              queryKey: ["logical-tree-expand-state", projectId],
+            }),
+          )
+          .catch((e) => setError(String(e)));
+      }, 250);
+    },
+    [expandPolicy.data, projectId, qc],
+  );
+
+  function toggleExpand(key: string, e?: ReactMouseEvent) {
+    e?.preventDefault();
+    e?.stopPropagation();
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      persistExpand(next);
+      return next;
+    });
+  }
 
   const codePreview = useQuery({
     queryKey: ["doc-code", projectId, categoryKey, assignCode],
@@ -144,11 +241,77 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
     }
   }
 
-  function onDocContextMenu(e: ReactMouseEvent, doc: DocumentRow) {
+  async function openDocPreferred(docId: string) {
+    try {
+      setError(null);
+      setSelectedDocumentId(docId);
+      setInspectorTab("doc-detail");
+      const formats = await api.listDocumentOpenFormats(docId);
+      if (formats.needs_picker) {
+        setFormatPicker({
+          documentId: docId,
+          formats: formats.formats,
+          rememberOnChoose: true,
+          title: "Elegir formato preferido",
+        });
+        return;
+      }
+      await api.openDocumentPrincipal(docId);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function openFormatOnce(docId: string, format: string) {
+    try {
+      setError(null);
+      await api.openDocumentWithFormat(docId, format, false);
+      setCtxMenu(null);
+    } catch (e) {
+      setError(String(e));
+      setCtxMenu(null);
+    }
+  }
+
+  async function changeDefaultFormat(docId: string, format: string) {
+    try {
+      setError(null);
+      await api.setDocumentOpenPreference(docId, format);
+      setCtxMenu(null);
+    } catch (e) {
+      setError(String(e));
+      setCtxMenu(null);
+    }
+  }
+
+  async function openFileLeaf(file: DocumentFileRow) {
+    try {
+      setError(null);
+      await api.openDocumentFile(
+        file.id,
+        file.relative_path.includes(".ingmanager/snapshots"),
+      );
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function onDocContextMenu(e: ReactMouseEvent, doc: DocumentRow) {
     e.preventDefault();
     e.stopPropagation();
     setSelectedDocumentId(doc.id);
-    setCtxMenu({ x: e.clientX, y: e.clientY, doc });
+    let formats: string[] = [];
+    try {
+      formats = (await api.listDocumentOpenFormats(doc.id)).formats;
+    } catch {
+      formats = [];
+    }
+    setCtxMenu({
+      x: e.clientX,
+      y: e.clientY,
+      target: { kind: "doc", doc },
+      formats,
+    });
   }
 
   const statuses = useMemo(() => {
@@ -197,17 +360,6 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
       await qc.invalidateQueries({
         queryKey: ["subcategories", projectId, categoryKey],
       });
-    } catch (e) {
-      setError(String(e));
-    }
-  }
-
-  async function openLogicalPrincipal(docId: string) {
-    try {
-      setError(null);
-      setSelectedDocumentId(docId);
-      setInspectorTab("doc-detail");
-      await api.openDocumentPrincipal(docId);
     } catch (e) {
       setError(String(e));
     }
@@ -307,14 +459,13 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
             </div>
           </div>
         )}
-        {(docs.data?.length ?? 0) > 0 && (
+        {(docs.data?.length ?? 0) > 0 && expandReady && (
           <table className="w-full border-collapse text-left">
             <thead className="sticky top-0 bg-panel">
               <tr className="border-b border-border text-[11px] uppercase text-muted">
-                <th className="h-[36px] px-3 font-medium">Código</th>
-                <th className="px-3 font-medium">Título</th>
+                <th className="h-[36px] px-3 font-medium">Documento / árbol</th>
                 <th className="w-[100px] px-3 font-medium">Estado</th>
-                {(categoryKey === "memorias" || categoryKey === "planos") && (
+                {usesRevisions && (
                   <th className="w-[100px] px-3 font-medium">Revisión actual</th>
                 )}
                 <th className="w-[70px] px-3 font-medium">Versión</th>
@@ -324,85 +475,43 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
             </thead>
             <tbody>
               {docs.data?.map((d) => (
-                <tr
+                <DocumentTreeRows
                   key={d.id}
-                  style={{ contentVisibility: "auto", containIntrinsicSize: "40px" }}
-                  className={cn(
-                    "h-[40px] cursor-pointer border-b border-border/50",
-                    selectedDocumentId === d.id
-                      ? "bg-selection"
-                      : "hover:bg-elevated",
-                  )}
-                  onClick={() => {
-                    setSelectedDocumentId(d.id);
+                  doc={d}
+                  projectId={projectId}
+                  categoryKey={categoryKey}
+                  usesRevisions={usesRevisions}
+                  showCurrentVersionOnly={showCurrentVersionOnly}
+                  expanded={expanded}
+                  selectedDocumentId={selectedDocumentId}
+                  onToggleExpand={toggleExpand}
+                  onSelectDoc={(id) => {
+                    setSelectedDocumentId(id);
                     setInspectorTab("doc-detail");
                     setCtxMenu(null);
                   }}
-                  onDoubleClick={() => {
-                    setCtxMenu(null);
-                    void openLogicalPrincipal(d.id);
+                  onOpenDoc={(id) => void openDocPreferred(id)}
+                  onOpenFile={(f) => void openFileLeaf(f)}
+                  onDocContextMenu={onDocContextMenu}
+                  onFileContextMenu={(e, doc, file) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setSelectedDocumentId(doc.id);
+                    setCtxMenu({
+                      x: e.clientX,
+                      y: e.clientY,
+                      target: { kind: "file", doc, file },
+                      formats: [],
+                    });
                   }}
-                  onContextMenu={(e) => onDocContextMenu(e, d)}
-                  title="Doble clic: abrir archivo principal (DOCX/DWG/SDB/RVT)"
-                >
-                  <td className="px-3 font-mono text-[12px] text-accent">
-                    {d.business_code ?? "—"}
-                  </td>
-                  <td className="truncate px-3">
-                    <span className="inline-flex items-center gap-1.5">
-                      {d.title}
-                      {d.has_unregistered_change === 1 && (
-                        <span
-                          title="Cambio detectado respecto a la versión registrada"
-                          className="inline-flex text-warn"
-                        >
-                          <AlertTriangle size={12} />
-                        </span>
-                      )}
-                      {d.file_count === 0 && (
-                        <span className="text-[10px] uppercase text-error">
-                          no disponible
-                        </span>
-                      )}
-                    </span>
-                    {d.subcategory && (
-                      <div className="text-[11px] text-muted">{d.subcategory}</div>
-                    )}
-                  </td>
-                  <td className="px-3 text-[12px] text-muted">{d.status}</td>
-                  {(categoryKey === "memorias" || categoryKey === "planos") && (
-                    <td className="px-3 font-mono text-[12px]">
-                      {d.current_revision_code ? (
-                        <span className="inline-flex items-center gap-1">
-                          {d.current_revision_code}
-                          <span className="text-[10px] uppercase text-muted">
-                            {d.current_revision_status === "issued"
-                              ? "emitida"
-                              : "borrador"}
-                          </span>
-                        </span>
-                      ) : (
-                        "—"
-                      )}
-                    </td>
-                  )}
-                  <td className="px-3 font-mono text-[12px]">
-                    {showCurrentVersionOnly
-                      ? (d.current_version_label ?? "—")
-                      : (d.current_version_label ?? "—")}
-                  </td>
-                  <td className="px-3 tabular-nums text-muted">{d.file_count}</td>
-                  <td className="truncate px-3 text-[11px] text-muted">
-                    {d.origin || d.notes || "—"}
-                  </td>
-                </tr>
+                />
               ))}
             </tbody>
           </table>
         )}
-        {ctxMenu && (
+        {ctxMenu?.target.kind === "doc" ? (
           <div
-            className="fixed z-50 min-w-[220px] border border-border bg-panel py-1 shadow-lg"
+            className="fixed z-50 max-h-[70vh] min-w-[240px] overflow-auto border border-border bg-panel py-1 shadow-lg"
             style={{ left: ctxMenu.x, top: ctxMenu.y }}
             onClick={(e) => e.stopPropagation()}
           >
@@ -410,7 +519,9 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
               type="button"
               className="block w-full px-3 py-1.5 text-left text-[12.5px] hover:bg-elevated"
               onClick={() => {
-                setSelectedDocumentId(ctxMenu.doc.id);
+                const id = (ctxMenu.target as { kind: "doc"; doc: DocumentRow }).doc
+                  .id;
+                setSelectedDocumentId(id);
                 setInspectorTab("doc-detail");
                 setCtxMenu(null);
               }}
@@ -421,23 +532,123 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
               type="button"
               className="block w-full px-3 py-1.5 text-left text-[12.5px] hover:bg-elevated"
               onClick={() => {
-                const id = ctxMenu.doc.id;
+                const id = (ctxMenu.target as { kind: "doc"; doc: DocumentRow }).doc
+                  .id;
                 setCtxMenu(null);
-                void openLogicalPrincipal(id);
+                void openDocPreferred(id);
               }}
             >
-              Abrir archivo principal
+              Abrir (preferido / actual)
             </button>
+            {ctxMenu.formats.map((fmt) => (
+              <button
+                key={`once-${fmt}`}
+                type="button"
+                className="block w-full px-3 py-1.5 text-left text-[12.5px] hover:bg-elevated"
+                onClick={() => {
+                  const id = (ctxMenu.target as { kind: "doc"; doc: DocumentRow })
+                    .doc.id;
+                  void openFormatOnce(id, fmt);
+                }}
+              >
+                Abrir {formatChipLabel(fmt)} (sin cambiar predeterminado)
+              </button>
+            ))}
+            {ctxMenu.formats.length > 0 && (
+              <div className="my-1 border-t border-border" />
+            )}
+            {ctxMenu.formats.map((fmt) => (
+              <button
+                key={`def-${fmt}`}
+                type="button"
+                className="block w-full px-3 py-1.5 text-left text-[12.5px] hover:bg-elevated"
+                onClick={() => {
+                  const id = (ctxMenu.target as { kind: "doc"; doc: DocumentRow })
+                    .doc.id;
+                  void changeDefaultFormat(id, fmt);
+                }}
+              >
+                Predeterminado: {formatChipLabel(fmt)}
+              </button>
+            ))}
+            <div className="my-1 border-t border-border" />
             <button
               type="button"
               className="block w-full px-3 py-1.5 text-left text-[12.5px] text-error hover:bg-elevated"
-              onClick={() => void deleteLogical(ctxMenu.doc)}
+              onClick={() => {
+                const d = (ctxMenu.target as { kind: "doc"; doc: DocumentRow }).doc;
+                void deleteLogical(d);
+              }}
             >
               Eliminar documento lógico…
             </button>
           </div>
-        )}
+        ) : null}
+        {ctxMenu?.target.kind === "file" ? (
+          <div
+            className="fixed z-50 min-w-[220px] border border-border bg-panel py-1 shadow-lg"
+            style={{ left: ctxMenu.x, top: ctxMenu.y }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              className="block w-full px-3 py-1.5 text-left text-[12.5px] hover:bg-elevated"
+              onClick={() => {
+                const f = (
+                  ctxMenu.target as { kind: "file"; file: DocumentFileRow }
+                ).file;
+                setCtxMenu(null);
+                void openFileLeaf(f);
+              }}
+            >
+              Abrir este archivo
+            </button>
+          </div>
+        ) : null}
       </div>
+
+      {formatPicker && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55">
+          <div className="w-[360px] border border-border bg-panel shadow-xl">
+            <div className="border-b border-border px-4 py-3">
+              <h2 className="text-[14px] font-semibold">{formatPicker.title}</h2>
+              <p className="text-[12px] text-muted">
+                Se recordará por documento para el próximo doble clic.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2 p-4">
+              {formatPicker.formats.map((fmt) => (
+                <Button
+                  key={fmt}
+                  size="sm"
+                  onClick={() => {
+                    const id = formatPicker.documentId;
+                    const remember = formatPicker.rememberOnChoose;
+                    setFormatPicker(null);
+                    void (async () => {
+                      try {
+                        await api.openDocumentWithFormat(id, fmt, remember);
+                      } catch (e) {
+                        setError(String(e));
+                      }
+                    })();
+                  }}
+                >
+                  {formatChipLabel(fmt)}
+                </Button>
+              ))}
+            </div>
+            <div className="flex justify-end border-t border-border px-4 py-3">
+              <Button
+                variant="secondary"
+                onClick={() => setFormatPicker(null)}
+              >
+                Cancelar
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {createOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55">
@@ -561,5 +772,399 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
         </div>
       )}
     </div>
+  );
+}
+
+interface DocumentTreeRowsProps {
+  doc: DocumentRow;
+  projectId: string;
+  categoryKey: string;
+  usesRevisions: boolean;
+  showCurrentVersionOnly: boolean;
+  expanded: Set<string>;
+  selectedDocumentId: string | null;
+  onToggleExpand: (key: string, e?: ReactMouseEvent) => void;
+  onSelectDoc: (id: string) => void;
+  onOpenDoc: (id: string) => void;
+  onOpenFile: (file: DocumentFileRow) => void;
+  onDocContextMenu: (e: ReactMouseEvent, doc: DocumentRow) => void;
+  onFileContextMenu: (
+    e: ReactMouseEvent,
+    doc: DocumentRow,
+    file: DocumentFileRow,
+  ) => void;
+}
+
+function DocumentTreeRows({
+  doc,
+  usesRevisions,
+  showCurrentVersionOnly,
+  expanded,
+  selectedDocumentId,
+  onToggleExpand,
+  onSelectDoc,
+  onOpenDoc,
+  onOpenFile,
+  onDocContextMenu,
+  onFileContextMenu,
+}: DocumentTreeRowsProps) {
+  const docKey = treeNodeKey("doc", doc.id);
+  const isOpen = expanded.has(docKey);
+
+  const revisions = useQuery({
+    queryKey: ["doc-revisions", doc.id],
+    queryFn: () => api.listRevisions(doc.id),
+    enabled: isOpen && usesRevisions,
+  });
+
+  const versions = useQuery({
+    queryKey: ["doc-versions", doc.id],
+    queryFn: () => api.listDocumentVersions(doc.id),
+    enabled: isOpen && !usesRevisions,
+  });
+
+  const middleNodes: Array<
+    | { kind: "rev"; row: RevisionRow }
+    | { kind: "ver"; row: DocumentVersionRow }
+  > = useMemo(() => {
+    if (!isOpen) return [];
+    if (usesRevisions) {
+      return (revisions.data ?? []).map((row) => ({ kind: "rev" as const, row }));
+    }
+    let list = versions.data ?? [];
+    if (showCurrentVersionOnly) {
+      list = list.filter((v) => v.is_current === 1);
+    }
+    return list.map((row) => ({ kind: "ver" as const, row }));
+  }, [
+    isOpen,
+    usesRevisions,
+    revisions.data,
+    versions.data,
+    showCurrentVersionOnly,
+  ]);
+
+  return (
+    <>
+      <tr
+        style={{ contentVisibility: "auto", containIntrinsicSize: "40px" }}
+        className={cn(
+          "h-[40px] cursor-pointer border-b border-border/50",
+          selectedDocumentId === doc.id ? "bg-selection" : "hover:bg-elevated",
+        )}
+        onClick={() => onSelectDoc(doc.id)}
+        onDoubleClick={() => onOpenDoc(doc.id)}
+        onContextMenu={(e) => onDocContextMenu(e, doc)}
+        title="Doble clic: abrir formato preferido de la revisión/versión actual · chevron: expandir"
+      >
+        <td className="px-3">
+          <div className="flex min-w-0 items-center gap-1">
+            <button
+              type="button"
+              className="inline-flex h-6 w-6 shrink-0 items-center justify-center text-muted hover:text-text"
+              aria-label={isOpen ? "Colapsar" : "Expandir"}
+              onClick={(e) => onToggleExpand(docKey, e)}
+            >
+              {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            </button>
+            <span className="min-w-0 truncate">
+              <span className="font-mono text-[12px] text-accent">
+                {doc.business_code ?? "—"}
+              </span>{" "}
+              <span className="text-[13px]">{doc.title}</span>
+              {doc.has_unregistered_change === 1 && (
+                <span
+                  title="Cambio detectado respecto a la versión registrada"
+                  className="ml-1 inline-flex text-warn"
+                >
+                  <AlertTriangle size={12} />
+                </span>
+              )}
+              {doc.file_count === 0 && (
+                <span className="ml-1 text-[10px] uppercase text-error">
+                  no disponible
+                </span>
+              )}
+              {doc.subcategory && (
+                <span className="ml-1 text-[11px] text-muted">
+                  · {doc.subcategory}
+                </span>
+              )}
+            </span>
+          </div>
+        </td>
+        <td className="px-3 text-[12px] text-muted">{doc.status}</td>
+        {usesRevisions && (
+          <td className="px-3 font-mono text-[12px]">
+            {doc.current_revision_code ? (
+              <span className="inline-flex items-center gap-1">
+                {doc.current_revision_code}
+                <span className="text-[10px] uppercase text-muted">
+                  {doc.current_revision_status === "issued" ? "emitida" : "borrador"}
+                </span>
+              </span>
+            ) : (
+              "—"
+            )}
+          </td>
+        )}
+        <td className="px-3 font-mono text-[12px]">
+          {doc.current_version_label ?? "—"}
+        </td>
+        <td className="px-3 tabular-nums text-muted">{doc.file_count}</td>
+        <td className="truncate px-3 text-[11px] text-muted">
+          {doc.origin || doc.notes || "—"}
+        </td>
+      </tr>
+
+      {isOpen && usesRevisions && revisions.isLoading && (
+        <tr className="border-b border-border/40">
+          <td colSpan={6} className="px-10 py-1 text-[11px] text-muted">
+            Cargando revisiones…
+          </td>
+        </tr>
+      )}
+      {isOpen && !usesRevisions && versions.isLoading && (
+        <tr className="border-b border-border/40">
+          <td colSpan={5} className="px-10 py-1 text-[11px] text-muted">
+            Cargando versiones…
+          </td>
+        </tr>
+      )}
+
+      {middleNodes.map((node) =>
+        node.kind === "rev" ? (
+          <RevisionBranch
+            key={node.row.id}
+            doc={doc}
+            revision={node.row}
+            usesRevisions={usesRevisions}
+            expanded={expanded}
+            onToggleExpand={onToggleExpand}
+            onOpenFile={onOpenFile}
+            onFileContextMenu={onFileContextMenu}
+          />
+        ) : (
+          <VersionBranch
+            key={node.row.id}
+            doc={doc}
+            version={node.row}
+            usesRevisions={usesRevisions}
+            expanded={expanded}
+            onToggleExpand={onToggleExpand}
+            onOpenFile={onOpenFile}
+            onFileContextMenu={onFileContextMenu}
+          />
+        ),
+      )}
+    </>
+  );
+}
+
+function RevisionBranch({
+  doc,
+  revision,
+  usesRevisions,
+  expanded,
+  onToggleExpand,
+  onOpenFile,
+  onFileContextMenu,
+}: {
+  doc: DocumentRow;
+  revision: RevisionRow;
+  usesRevisions: boolean;
+  expanded: Set<string>;
+  onToggleExpand: (key: string, e?: ReactMouseEvent) => void;
+  onOpenFile: (file: DocumentFileRow) => void;
+  onFileContextMenu: (
+    e: ReactMouseEvent,
+    doc: DocumentRow,
+    file: DocumentFileRow,
+  ) => void;
+}) {
+  const key = treeNodeKey("rev", revision.id);
+  const isOpen = expanded.has(key);
+  const files = useQuery({
+    queryKey: ["doc-revision-files", revision.id],
+    queryFn: () => api.listRevisionFiles(revision.id),
+    enabled: isOpen,
+  });
+  const colSpan = usesRevisions ? 6 : 5;
+
+  return (
+    <>
+      <tr className="h-[34px] border-b border-border/40 hover:bg-elevated/60">
+        <td className="px-3" colSpan={colSpan}>
+          <div className="flex items-center gap-1 pl-6">
+            <button
+              type="button"
+              className="inline-flex h-6 w-6 shrink-0 items-center justify-center text-muted hover:text-text"
+              aria-label={isOpen ? "Colapsar revisión" : "Expandir revisión"}
+              onClick={(e) => onToggleExpand(key, e)}
+            >
+              {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            </button>
+            <span className="font-mono text-[12px] text-accent">
+              Rev. {revision.revision_code}
+            </span>
+            <span className="text-[11px] text-muted">
+              {revision.status === "issued"
+                ? "emitida"
+                : revision.status === "draft"
+                  ? "borrador"
+                  : (revision.status ?? "")}
+            </span>
+            {files.data && (
+              <span className="text-[11px] text-muted">
+                · {files.data.length} archivo(s)
+              </span>
+            )}
+          </div>
+        </td>
+      </tr>
+      {isOpen && files.isLoading && (
+        <tr className="border-b border-border/30">
+          <td colSpan={colSpan} className="px-16 py-1 text-[11px] text-muted">
+            Cargando archivos…
+          </td>
+        </tr>
+      )}
+      {isOpen &&
+        files.data?.map((f) => (
+          <FileLeafRow
+            key={f.id}
+            doc={doc}
+            file={f}
+            depth={2}
+            colSpan={colSpan}
+            onOpenFile={onOpenFile}
+            onFileContextMenu={onFileContextMenu}
+          />
+        ))}
+    </>
+  );
+}
+
+function VersionBranch({
+  doc,
+  version,
+  usesRevisions,
+  expanded,
+  onToggleExpand,
+  onOpenFile,
+  onFileContextMenu,
+}: {
+  doc: DocumentRow;
+  version: DocumentVersionRow;
+  usesRevisions: boolean;
+  expanded: Set<string>;
+  onToggleExpand: (key: string, e?: ReactMouseEvent) => void;
+  onOpenFile: (file: DocumentFileRow) => void;
+  onFileContextMenu: (
+    e: ReactMouseEvent,
+    doc: DocumentRow,
+    file: DocumentFileRow,
+  ) => void;
+}) {
+  const key = treeNodeKey("ver", version.id);
+  const isOpen = expanded.has(key);
+  const files = useQuery({
+    queryKey: ["doc-version-files", version.id],
+    queryFn: () => api.listVersionFiles(version.id),
+    enabled: isOpen,
+  });
+  const colSpan = usesRevisions ? 6 : 5;
+
+  return (
+    <>
+      <tr className="h-[34px] border-b border-border/40 hover:bg-elevated/60">
+        <td className="px-3" colSpan={colSpan}>
+          <div className="flex items-center gap-1 pl-6">
+            <button
+              type="button"
+              className="inline-flex h-6 w-6 shrink-0 items-center justify-center text-muted hover:text-text"
+              aria-label={isOpen ? "Colapsar versión" : "Expandir versión"}
+              onClick={(e) => onToggleExpand(key, e)}
+            >
+              {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            </button>
+            <span className="font-mono text-[12px]">
+              {version.label ?? `v${version.version_number}`}
+            </span>
+            {version.is_current === 1 && (
+              <span className="text-[10px] uppercase text-muted">actual</span>
+            )}
+            {files.data && (
+              <span className="text-[11px] text-muted">
+                · {files.data.length} archivo(s)
+              </span>
+            )}
+          </div>
+        </td>
+      </tr>
+      {isOpen && files.isLoading && (
+        <tr className="border-b border-border/30">
+          <td colSpan={colSpan} className="px-16 py-1 text-[11px] text-muted">
+            Cargando archivos…
+          </td>
+        </tr>
+      )}
+      {isOpen &&
+        files.data?.map((f) => (
+          <FileLeafRow
+            key={f.id}
+            doc={doc}
+            file={f}
+            depth={2}
+            colSpan={colSpan}
+            onOpenFile={onOpenFile}
+            onFileContextMenu={onFileContextMenu}
+          />
+        ))}
+    </>
+  );
+}
+
+function FileLeafRow({
+  doc,
+  file,
+  depth,
+  colSpan,
+  onOpenFile,
+  onFileContextMenu,
+}: {
+  doc: DocumentRow;
+  file: DocumentFileRow;
+  depth: number;
+  colSpan: number;
+  onOpenFile: (file: DocumentFileRow) => void;
+  onFileContextMenu: (
+    e: ReactMouseEvent,
+    doc: DocumentRow,
+    file: DocumentFileRow,
+  ) => void;
+}) {
+  return (
+    <tr
+      className="h-[32px] cursor-pointer border-b border-border/30 hover:bg-elevated/50"
+      onDoubleClick={() => onOpenFile(file)}
+      onContextMenu={(e) => onFileContextMenu(e, doc, file)}
+      title="Doble clic: abrir este archivo"
+    >
+      <td className="px-3" colSpan={colSpan}>
+        <div
+          className="flex min-w-0 items-center gap-2 text-[12px]"
+          style={{ paddingLeft: 12 + depth * 16 }}
+        >
+          <span className="truncate font-mono text-[11.5px]">{file.file_name}</span>
+          {file.format_label && (
+            <span className="text-[10px] text-muted">[{file.format_label}]</span>
+          )}
+          {file.is_available !== 1 && (
+            <span className="text-[10px] text-error">no disponible</span>
+          )}
+        </div>
+      </td>
+    </tr>
   );
 }

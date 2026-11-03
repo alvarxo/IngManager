@@ -736,6 +736,15 @@ export interface AvailabilityCleanupResult {
   document_ids_removed: string[];
 }
 
+export interface DocumentOpenFormats {
+  document_id: string;
+  formats: string[];
+  preferred_format: string | null;
+  needs_picker: boolean;
+}
+
+export type LogicalTreeExpandPolicy = "remember" | "collapsed" | "expanded";
+
 export interface BulkRegisterInput {
   project_id: string;
   category_key: string;

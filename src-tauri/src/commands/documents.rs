@@ -1293,27 +1293,37 @@ async fn open_document_file_by_id(
 }
 
 /// Resolve principal file id without opening (for tests / UI previews).
-/// Prefer draft DOCX (editable, non-snapshot) of the current revision when present.
+/// Order: remembered per-doc format → draft DOCX of current revision → any DOCX → rank.
 pub async fn resolve_document_principal_file_id(
     state: &AppState,
     document_id: &str,
 ) -> AppResult<String> {
+    let available = list_current_openable_files(state, document_id).await?;
+    if available.is_empty() {
+        return Err(AppError::msg("No hay archivos disponibles"));
+    }
+
     let docs =
         enrich_current_revisions(state, vec![fetch_document(state, document_id).await?]).await?;
     let doc = docs
         .into_iter()
         .next()
         .ok_or_else(|| AppError::msg("Documento no encontrado"))?;
-    let version_id = doc
-        .current_version_id
-        .ok_or_else(|| AppError::msg("El documento no tiene versión actual"))?;
-    let files = list_version_files_inner(state, &version_id).await?;
-    let available: Vec<_> = files
-        .into_iter()
-        .filter(|f| f.is_available != 0)
-        .collect();
-    if available.is_empty() {
-        return Err(AppError::msg("No hay archivos disponibles"));
+
+    // 0) Per-document remembered format preference
+    if let Some(pref) =
+        crate::logical_tree::preferred_open_ext_from_metadata(doc.metadata_json.as_deref())
+    {
+        if let Some(f) = available.iter().find(|f| {
+            crate::logical_tree::file_matches_format(
+                f.extension.as_deref(),
+                f.format_label.as_deref(),
+                &f.file_name,
+                &pref,
+            )
+        }) {
+            return Ok(f.id.clone());
+        }
     }
 
     let current_rev = doc.current_revision_code.clone();
@@ -1354,6 +1364,253 @@ pub async fn resolve_document_principal_file_id(
     )
     .unwrap_or(0);
     Ok(available[pick].id.clone())
+}
+
+/// Available files on the current version (optionally scoped to current revision).
+pub async fn list_current_openable_files(
+    state: &AppState,
+    document_id: &str,
+) -> AppResult<Vec<DocumentFileRow>> {
+    let docs =
+        enrich_current_revisions(state, vec![fetch_document(state, document_id).await?]).await?;
+    let doc = docs
+        .into_iter()
+        .next()
+        .ok_or_else(|| AppError::msg("Documento no encontrado"))?;
+    let version_id = doc
+        .current_version_id
+        .ok_or_else(|| AppError::msg("El documento no tiene versión actual"))?;
+    let files = list_version_files_inner(state, &version_id).await?;
+    let available: Vec<_> = files
+        .into_iter()
+        .filter(|f| f.is_available != 0)
+        .collect();
+
+    let cat = doc.category_key.as_deref().unwrap_or("");
+    if crate::doc_revisions::category_uses_revisions(cat) {
+        if let Some(code) = doc.current_revision_code.as_deref() {
+            // Prefer files of the current revision when revision rows exist
+            let rev_files: Vec<_> = available
+                .iter()
+                .filter(|f| file_belongs_to_revision(f, code))
+                .cloned()
+                .collect();
+            if !rev_files.is_empty() {
+                return Ok(rev_files);
+            }
+        }
+    }
+    Ok(available)
+}
+
+fn file_belongs_to_revision(f: &DocumentFileRow, revision_code: &str) -> bool {
+    if let Some(parsed) = crate::doc_revisions::parse_revision_filename(&f.file_name) {
+        return parsed.revision_code == revision_code;
+    }
+    false
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentOpenFormats {
+    pub document_id: String,
+    pub formats: Vec<String>,
+    pub preferred_format: Option<String>,
+    pub needs_picker: bool,
+}
+
+#[tauri::command]
+pub async fn list_document_open_formats(
+    state: State<'_, AppState>,
+    document_id: String,
+) -> AppResult<DocumentOpenFormats> {
+    list_document_open_formats_inner(&state, &document_id).await
+}
+
+pub async fn list_document_open_formats_inner(
+    state: &AppState,
+    document_id: &str,
+) -> AppResult<DocumentOpenFormats> {
+    let doc = fetch_document(state, document_id).await?;
+    let available = list_current_openable_files(state, document_id).await?;
+    let formats = crate::logical_tree::distinct_open_formats(
+        available
+            .iter()
+            .map(|f| (f.extension.as_deref(), f.format_label.as_deref(), f.file_name.as_str())),
+    );
+    let preferred =
+        crate::logical_tree::preferred_open_ext_from_metadata(doc.metadata_json.as_deref());
+    let preferred_ok = preferred
+        .as_ref()
+        .map(|p| formats.iter().any(|f| f == p))
+        .unwrap_or(false);
+    let needs_picker = formats.len() > 1 && !preferred_ok;
+    Ok(DocumentOpenFormats {
+        document_id: document_id.to_string(),
+        formats,
+        preferred_format: if preferred_ok { preferred } else { None },
+        needs_picker,
+    })
+}
+
+#[tauri::command]
+pub async fn get_document_open_preference(
+    state: State<'_, AppState>,
+    document_id: String,
+) -> AppResult<Option<String>> {
+    let doc = fetch_document(&state, &document_id).await?;
+    Ok(crate::logical_tree::preferred_open_ext_from_metadata(
+        doc.metadata_json.as_deref(),
+    ))
+}
+
+#[tauri::command]
+pub async fn set_document_open_preference(
+    state: State<'_, AppState>,
+    document_id: String,
+    format: Option<String>,
+) -> AppResult<Option<String>> {
+    set_document_open_preference_inner(&state, &document_id, format.as_deref()).await
+}
+
+pub async fn set_document_open_preference_inner(
+    state: &AppState,
+    document_id: &str,
+    format: Option<&str>,
+) -> AppResult<Option<String>> {
+    let doc = fetch_document(state, document_id).await?;
+    let merged = crate::logical_tree::merge_preferred_open_ext(
+        doc.metadata_json.as_deref(),
+        format,
+    )?;
+    sqlx::query(
+        "UPDATE documents SET metadata_json = ?, updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(&merged)
+    .bind(document_id)
+    .execute(&state.pool)
+    .await?;
+    Ok(crate::logical_tree::preferred_open_ext_from_metadata(Some(
+        &merged,
+    )))
+}
+
+#[tauri::command]
+pub async fn open_document_with_format(
+    state: State<'_, AppState>,
+    document_id: String,
+    format: String,
+    remember: Option<bool>,
+    use_temp_copy: Option<bool>,
+) -> AppResult<String> {
+    open_document_with_format_inner(
+        &state,
+        &document_id,
+        &format,
+        remember.unwrap_or(false),
+        use_temp_copy,
+    )
+    .await
+}
+
+/// Open a specific format of the current rev/version. When `remember`, updates preference.
+pub async fn open_document_with_format_inner(
+    state: &AppState,
+    document_id: &str,
+    format: &str,
+    remember: bool,
+    use_temp_copy: Option<bool>,
+) -> AppResult<String> {
+    let available = list_current_openable_files(state, document_id).await?;
+    let file = available
+        .iter()
+        .find(|f| {
+            crate::logical_tree::file_matches_format(
+                f.extension.as_deref(),
+                f.format_label.as_deref(),
+                &f.file_name,
+                format,
+            )
+        })
+        .ok_or_else(|| {
+            AppError::msg(format!(
+                "No hay archivo disponible en formato «{}»",
+                crate::logical_tree::normalize_format_token(format)
+            ))
+        })?;
+    if remember {
+        set_document_open_preference_inner(state, document_id, Some(format)).await?;
+    }
+    open_document_file_by_id(state, &file.id, use_temp_copy).await
+}
+
+/// Resolve which file would open for a format (tests / picker) without launching the OS.
+pub async fn resolve_document_file_for_format(
+    state: &AppState,
+    document_id: &str,
+    format: &str,
+) -> AppResult<String> {
+    let available = list_current_openable_files(state, document_id).await?;
+    available
+        .iter()
+        .find(|f| {
+            crate::logical_tree::file_matches_format(
+                f.extension.as_deref(),
+                f.format_label.as_deref(),
+                &f.file_name,
+                format,
+            )
+        })
+        .map(|f| f.id.clone())
+        .ok_or_else(|| {
+            AppError::msg(format!(
+                "No hay archivo disponible en formato «{}»",
+                crate::logical_tree::normalize_format_token(format)
+            ))
+        })
+}
+
+#[tauri::command]
+pub async fn list_revision_files(
+    state: State<'_, AppState>,
+    revision_id: String,
+) -> AppResult<Vec<DocumentFileRow>> {
+    list_revision_files_inner(&state, &revision_id).await
+}
+
+pub async fn list_revision_files_inner(
+    state: &AppState,
+    revision_id: &str,
+) -> AppResult<Vec<DocumentFileRow>> {
+    let rev: Option<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT id, document_id, revision_code FROM revisions WHERE id = ?",
+    )
+    .bind(revision_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((_id, document_id, revision_code)) = rev else {
+        return Err(AppError::msg("Revisión no encontrada"));
+    };
+    let code = revision_code.unwrap_or_default();
+
+    // Prefer explicit revision_id links; also include filename-matched files on the doc.
+    let mut files = sqlx::query_as::<_, DocumentFileRow>(
+        "SELECT f.id, f.document_version_id, f.relative_path, f.file_name, f.extension,
+                f.size_bytes, f.modified_at, f.content_hash, f.is_available, f.format_label,
+                f.revision_id, f.created_at
+         FROM document_files f
+         JOIN document_versions v ON v.id = f.document_version_id
+         WHERE v.document_id = ?
+         ORDER BY f.file_name COLLATE NOCASE",
+    )
+    .bind(&document_id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    files.retain(|f| {
+        f.revision_id.as_deref() == Some(revision_id)
+            || (!code.is_empty() && file_belongs_to_revision(f, &code))
+    });
+    Ok(files)
 }
 
 /// Repair mis-assigned internal versions → issued/draft revisions for memorias/planos.

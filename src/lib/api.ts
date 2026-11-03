@@ -56,6 +56,8 @@ import type {
   BulkRegisterInput,
   BulkRegisterResult,
   AvailabilityCleanupResult,
+  DocumentOpenFormats,
+  LogicalTreeExpandPolicy,
   UpdatePlanItemInput,
   OrganizerPlanItem,
   IncorporationPreviewInput,
@@ -286,6 +288,51 @@ export const api = {
     invoke<string>("open_document_principal", {
       documentId,
       useTempCopy: useTempCopy ?? null,
+    }),
+  listDocumentOpenFormats: (documentId: string) =>
+    invoke<DocumentOpenFormats>("list_document_open_formats", { documentId }),
+  getDocumentOpenPreference: (documentId: string) =>
+    invoke<string | null>("get_document_open_preference", { documentId }),
+  setDocumentOpenPreference: (documentId: string, format?: string | null) =>
+    invoke<string | null>("set_document_open_preference", {
+      documentId,
+      format: format ?? null,
+    }),
+  openDocumentWithFormat: (
+    documentId: string,
+    format: string,
+    remember = false,
+    useTempCopy?: boolean | null,
+  ) =>
+    invoke<string>("open_document_with_format", {
+      documentId,
+      format,
+      remember,
+      useTempCopy: useTempCopy ?? null,
+    }),
+  listRevisionFiles: (revisionId: string) =>
+    invoke<DocumentFileRow[]>("list_revision_files", { revisionId }),
+  getAppSetting: (key: string) =>
+    invoke<string | null>("get_app_setting", { key }),
+  setAppSetting: (key: string, value: string) =>
+    invoke<void>("set_app_setting", { key, value }),
+  getLogicalTreeExpandPolicy: () =>
+    invoke<LogicalTreeExpandPolicy>("get_logical_tree_expand_policy"),
+  setLogicalTreeExpandPolicy: (policy: LogicalTreeExpandPolicy | string) =>
+    invoke<LogicalTreeExpandPolicy>("set_logical_tree_expand_policy", {
+      policy,
+    }),
+  getLogicalTreeExpandState: (projectId: string) =>
+    invoke<Record<string, boolean>>("get_logical_tree_expand_state", {
+      projectId,
+    }),
+  setLogicalTreeExpandState: (
+    projectId: string,
+    stateJson: Record<string, boolean>,
+  ) =>
+    invoke<void>("set_logical_tree_expand_state", {
+      projectId,
+      stateJson,
     }),
   listRevisions: (documentId: string) =>
     invoke<RevisionRow[]>("list_revisions", { documentId }),

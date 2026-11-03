@@ -1,12 +1,76 @@
 use std::path::PathBuf;
 
+use serde_json::Value;
 use tauri::State;
 
 use crate::db;
 use crate::error::{AppError, AppResult};
+use crate::logical_tree::{self, ExpandPolicy};
 use crate::models::AppStatus;
 use crate::project_paths::{self, AuthorizedRoot};
 use crate::state::AppState;
+
+#[tauri::command]
+pub async fn get_app_setting(
+    state: State<'_, AppState>,
+    key: String,
+) -> AppResult<Option<String>> {
+    db::get_setting(&state.pool, key.trim()).await
+}
+
+#[tauri::command]
+pub async fn set_app_setting(
+    state: State<'_, AppState>,
+    key: String,
+    value: String,
+) -> AppResult<()> {
+    let k = key.trim();
+    if k.is_empty() {
+        return Err(AppError::msg("La clave de ajuste no puede estar vacía"));
+    }
+    db::set_setting(&state.pool, k, &value).await
+}
+
+#[tauri::command]
+pub async fn get_logical_tree_expand_policy(
+    state: State<'_, AppState>,
+) -> AppResult<String> {
+    Ok(logical_tree::get_expand_policy(&state.pool)
+        .await?
+        .as_str()
+        .to_string())
+}
+
+#[tauri::command]
+pub async fn set_logical_tree_expand_policy(
+    state: State<'_, AppState>,
+    policy: String,
+) -> AppResult<String> {
+    let p = ExpandPolicy::parse(&policy);
+    logical_tree::set_expand_policy(&state.pool, p).await?;
+    Ok(p.as_str().to_string())
+}
+
+#[tauri::command]
+pub async fn get_logical_tree_expand_state(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> AppResult<Value> {
+    logical_tree::get_expand_state_json(&state.pool, project_id.trim()).await
+}
+
+#[tauri::command]
+pub async fn set_logical_tree_expand_state(
+    state: State<'_, AppState>,
+    project_id: String,
+    state_json: Value,
+) -> AppResult<()> {
+    let pid = project_id.trim();
+    if pid.is_empty() {
+        return Err(AppError::msg("project_id vacío"));
+    }
+    logical_tree::set_expand_state_json(&state.pool, pid, &state_json).await
+}
 
 #[tauri::command]
 pub async fn get_app_status(state: State<'_, AppState>) -> AppResult<AppStatus> {

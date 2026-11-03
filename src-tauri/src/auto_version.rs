@@ -200,6 +200,8 @@ pub fn wait_until_stable(path: &Path, settle: Duration, max_wait: Duration) -> b
 }
 
 pub fn fingerprint_meta(path: &Path) -> AppResult<(String, u64, Option<String>)> {
+    use std::io::{Read, Seek, SeekFrom};
+
     let meta = fs::metadata(path)?;
     let size = meta.len();
     let modified = meta.modified().ok().and_then(|t| {
@@ -212,17 +214,25 @@ pub fn fingerprint_meta(path: &Path) -> AppResult<(String, u64, Option<String>)>
         hasher.update(m.as_bytes());
     }
     hasher.update(path.to_string_lossy().as_bytes());
-    if let Ok(bytes) = fs::read(path) {
-        let sample = if bytes.len() > 4096 {
-            &bytes[..4096]
-        } else {
-            &bytes
-        };
-        hasher.update(sample);
-        if bytes.len() > 4096 {
-            hasher.update(&bytes[bytes.len().saturating_sub(1024)..]);
+
+    // Never read the whole file into memory — large engineering models (GB)
+    // previously caused OOM crashes during open reconcile.
+    if let Ok(mut file) = fs::File::open(path) {
+        let mut head = vec![0u8; 4096.min(size as usize)];
+        if let Ok(n) = file.read(&mut head) {
+            hasher.update(&head[..n]);
         }
-        hasher.update(bytes.len().to_le_bytes());
+        if size > 4096 {
+            let tail_len = 1024u64.min(size);
+            let start = size.saturating_sub(tail_len);
+            if file.seek(SeekFrom::Start(start)).is_ok() {
+                let mut tail = vec![0u8; tail_len as usize];
+                if let Ok(n) = file.read(&mut tail) {
+                    hasher.update(&tail[..n]);
+                }
+            }
+        }
+        hasher.update(size.to_le_bytes());
     }
     Ok((hex::encode(hasher.finalize()), size, modified))
 }
@@ -736,19 +746,46 @@ pub async fn register_baseline(
 }
 
 /// Reconcile auto-versioning for all files under a project (on open).
+///
+/// `cancel` is polled between files so a newer open can abort work.
+/// Per-file errors are logged and skipped — they must not fail the whole open.
 pub async fn reconcile_project(
     pool: &SqlitePool,
     project_id: &str,
 ) -> AppResult<Vec<AutoVersionResult>> {
+    reconcile_project_cancelable(pool, project_id, None, None).await
+}
+
+pub async fn reconcile_project_cancelable(
+    pool: &SqlitePool,
+    project_id: &str,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    expected_generation: Option<(
+        &std::sync::atomic::AtomicU64,
+        u64,
+    )>,
+) -> AppResult<Vec<AutoVersionResult>> {
+    use std::sync::atomic::Ordering;
+
     let loc = project_paths::resolve_project_location(pool, project_id).await?;
     let mut results = Vec::new();
     if !loc.absolute_path.is_dir() {
         return Ok(results);
     }
+    let mut scanned: u64 = 0;
     for entry in walkdir::WalkDir::new(&loc.absolute_path)
         .into_iter()
         .filter_map(|e| e.ok())
     {
+        let cancelled = cancel.is_some_and(|c| c.load(Ordering::SeqCst))
+            || expected_generation.is_some_and(|(cell, gen)| cell.load(Ordering::SeqCst) != gen);
+        if cancelled {
+            crate::diagnostics::log_event(
+                "reconcile",
+                &format!("cancelled project={project_id} after {scanned} files"),
+            );
+            break;
+        }
         if !entry.file_type().is_file() {
             continue;
         }
@@ -760,22 +797,44 @@ pub async fn reconcile_project(
         }) {
             continue;
         }
+        scanned += 1;
         let name = entry.file_name().to_string_lossy();
         let parsed = parse_version_filename(&name);
         if !parsed.is_version_pattern {
-            let tracked: (i64,) = sqlx::query_as(
+            let tracked: (i64,) = match sqlx::query_as(
                 "SELECT COUNT(*) FROM file_version_tracking WHERE project_id = ? AND base_stem = ?",
             )
             .bind(project_id)
             .bind(&parsed.base_stem)
             .fetch_one(pool)
-            .await?;
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    crate::diagnostics::log_event(
+                        "reconcile",
+                        &format!("track query err {}: {e}", path.display()),
+                    );
+                    continue;
+                }
+            };
             if tracked.0 == 0 {
                 continue;
             }
         }
-        if let Some(r) = process_path(pool, path).await? {
-            results.push(r);
+        match process_path(pool, path).await {
+            Ok(Some(r)) => results.push(r),
+            Ok(None) => {}
+            Err(e) => {
+                crate::diagnostics::log_event(
+                    "reconcile",
+                    &format!("skip {}: {e}", path.display()),
+                );
+            }
+        }
+        // Yield so the async runtime can service other commands / cancel.
+        if scanned % 32 == 0 {
+            tokio::task::yield_now().await;
         }
     }
     Ok(results)

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use tauri::State;
 
 use crate::db;
+use crate::diagnostics;
 use crate::error::{AppError, AppResult};
 use crate::models::AppStatus;
 use crate::project_paths::{self, AuthorizedRoot};
@@ -110,4 +111,18 @@ pub async fn remove_authorized_root(
     root_id: String,
 ) -> AppResult<()> {
     project_paths::remove_authorized_root(&state.pool, &root_id).await
+}
+
+#[tauri::command]
+pub async fn get_diagnostics_dir() -> AppResult<String> {
+    Ok(diagnostics::diagnostics_dir()?.display().to_string())
+}
+
+#[tauri::command]
+pub async fn open_diagnostics_folder() -> AppResult<()> {
+    let dir = diagnostics::diagnostics_dir()?;
+    open::that(&dir).map_err(|e| {
+        AppError::msg(format!("No se pudo abrir la carpeta de diagnósticos: {e}"))
+    })?;
+    Ok(())
 }

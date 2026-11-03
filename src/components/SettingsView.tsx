@@ -193,6 +193,27 @@ export function SettingsView() {
       </section>
 
       <section className="mb-6 max-w-2xl border border-border bg-panel p-4">
+        <h2 className="mb-2 text-[13px] font-semibold">Diagnósticos</h2>
+        <p className="mb-3 text-[12px] text-muted">
+          Registro persistente de aperturas de proyecto y reconcile en segundo
+          plano (útil si un proyecto como 1090 fallaba al abrir).
+        </p>
+        <Button
+          variant="secondary"
+          onClick={async () => {
+            try {
+              await api.openDiagnosticsFolder();
+              setMsg("Carpeta de diagnósticos abierta.");
+            } catch (e) {
+              setMsg(String(e));
+            }
+          }}
+        >
+          Abrir carpeta de diagnósticos
+        </Button>
+      </section>
+
+      <section className="mb-6 max-w-2xl border border-border bg-panel p-4">
         <h2 className="mb-3 text-[13px] font-semibold">
           Añadir / importar proyecto existente
         </h2>

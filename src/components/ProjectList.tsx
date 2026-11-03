@@ -1,14 +1,30 @@
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Star } from "lucide-react";
 import { api } from "@/lib/api";
+import { openProjectSafe } from "@/lib/open-project";
+import type { Project } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui-store";
 import { Button } from "./ui/button";
 import { CreateProjectDialog } from "./CreateProjectDialog";
+import { DeleteProjectDialog } from "./DeleteProjectDialog";
+
+interface ContextMenuState {
+  x: number;
+  y: number;
+  project: Project;
+}
 
 export function ProjectList() {
+  const qc = useQueryClient();
   const [createOpen, setCreateOpen] = useState(false);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{
+    project: Project;
+    mode: "remove" | "delete";
+  } | null>(null);
+  const [openError, setOpenError] = useState<string | null>(null);
   const view = useUiStore((s) => s.view);
   const setView = useUiStore((s) => s.setView);
   const showArchived = useUiStore((s) => s.showArchived);
@@ -19,6 +35,49 @@ export function ProjectList() {
   });
 
   const selectedId = view.kind === "project" ? view.projectId : null;
+
+  useEffect(() => {
+    function close() {
+      setContextMenu(null);
+    }
+    window.addEventListener("click", close);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("scroll", close, true);
+    };
+  }, []);
+
+  async function openProject(project: Project) {
+    setOpenError(null);
+    setView({ kind: "project", projectId: project.id });
+    const result = await openProjectSafe(project.id);
+    if (!result.ok) {
+      setOpenError(
+        `No se pudo completar la apertura de ${project.code ?? project.name}: ${result.error}`,
+      );
+    }
+    await qc.invalidateQueries({ queryKey: ["recent-projects"] });
+  }
+
+  function onContextMenu(e: ReactMouseEvent, project: Project) {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({ x: e.clientX, y: e.clientY, project });
+  }
+
+  const archive = useMutation({
+    mutationFn: (id: string) => api.archiveProject(id),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["projects"] });
+      await qc.invalidateQueries({ queryKey: ["recent-projects"] });
+      setContextMenu(null);
+    },
+    onError: (e: Error) => {
+      setOpenError(String(e));
+      setContextMenu(null);
+    },
+  });
 
   return (
     <aside className="flex h-full w-full min-w-0 flex-col border-r border-border bg-panel">
@@ -31,6 +90,19 @@ export function ProjectList() {
           Nuevo
         </Button>
       </div>
+
+      {openError && (
+        <div className="border-b border-error/40 bg-error/10 px-3 py-2 text-[11.5px] text-error">
+          {openError}
+          <button
+            type="button"
+            className="ml-2 underline"
+            onClick={() => setOpenError(null)}
+          >
+            Cerrar
+          </button>
+        </div>
+      )}
 
       <div className="flex-1 overflow-auto">
         {isLoading && (
@@ -53,10 +125,8 @@ export function ProjectList() {
               <li key={p.id}>
                 <button
                   type="button"
-                  onClick={async () => {
-                    await api.openProject(p.id);
-                    setView({ kind: "project", projectId: p.id });
-                  }}
+                  onClick={() => void openProject(p)}
+                  onContextMenu={(e) => onContextMenu(e, p)}
                   className={cn(
                     "flex min-h-[42px] w-full items-center gap-2 border-b border-border/60 px-3 py-1 text-left",
                     selectedId === p.id
@@ -102,6 +172,99 @@ export function ProjectList() {
       </div>
 
       <CreateProjectDialog open={createOpen} onClose={() => setCreateOpen(false)} />
+
+      {deleteTarget && (
+        <DeleteProjectDialog
+          project={deleteTarget.project}
+          mode={deleteTarget.mode}
+          onClose={() => setDeleteTarget(null)}
+        />
+      )}
+
+      {contextMenu && (
+        <div
+          className="fixed z-50 min-w-[220px] border border-border bg-panel py-1 shadow-lg"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <MenuItem
+            label="Abrir"
+            onClick={() => {
+              const p = contextMenu.project;
+              setContextMenu(null);
+              void openProject(p);
+            }}
+          />
+          <MenuItem
+            label="Revelar en explorador"
+            onClick={() => {
+              const p = contextMenu.project;
+              setContextMenu(null);
+              void (async () => {
+                try {
+                  const path = await api.getProjectAbsolutePath(p.id);
+                  await api.revealInExplorer(path);
+                } catch (e) {
+                  setOpenError(String(e));
+                }
+              })();
+            }}
+          />
+          <MenuItem
+            label="Archivar"
+            disabled={contextMenu.project.status === "archived"}
+            onClick={() => archive.mutate(contextMenu.project.id)}
+          />
+          <div className="my-1 border-t border-border" />
+          <MenuItem
+            label="Quitar de IngManager…"
+            onClick={() => {
+              setDeleteTarget({
+                project: contextMenu.project,
+                mode: "remove",
+              });
+              setContextMenu(null);
+            }}
+          />
+          <MenuItem
+            label="Eliminar proyecto y archivos…"
+            onClick={() => {
+              setDeleteTarget({
+                project: contextMenu.project,
+                mode: "delete",
+              });
+              setContextMenu(null);
+            }}
+          />
+        </div>
+      )}
     </aside>
+  );
+}
+
+function MenuItem({
+  label,
+  onClick,
+  disabled,
+}: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      className={cn(
+        "flex w-full px-3 py-1.5 text-left text-[12.5px]",
+        disabled
+          ? "cursor-not-allowed text-muted"
+          : "hover:bg-elevated",
+      )}
+    >
+      {label}
+    </button>
   );
 }

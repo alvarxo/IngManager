@@ -36,6 +36,15 @@ export interface CreateProjectInput {
   folder_name?: string | null;
   authorized_root_id?: string | null;
   create_standard_folders?: boolean | null;
+  /** abort | use_existing | rename */
+  folder_conflict_policy?: string | null;
+}
+
+export interface DeleteProjectResult {
+  id: string;
+  code: string | null;
+  files_action: string;
+  message: string;
 }
 
 export interface UpdateProjectInput {

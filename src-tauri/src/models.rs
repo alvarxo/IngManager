@@ -38,6 +38,17 @@ pub struct CreateProjectInput {
     pub authorized_root_id: Option<String>,
     /// Create standard physical folders (default true).
     pub create_standard_folders: Option<bool>,
+    /// When the physical folder already exists:
+    /// `abort` (default) | `use_existing` | `rename`.
+    pub folder_conflict_policy: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteProjectResult {
+    pub id: String,
+    pub code: Option<String>,
+    pub files_action: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,13 +1,15 @@
 use std::path::PathBuf;
 
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 use crate::category_mapping::map_project_categories;
 use crate::codes::{current_year_two_digits, next_project_code};
+use crate::diagnostics;
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    CategorySummary, CreateProjectInput, Project, UpdateProjectInput, STANDARD_FOLDERS,
+    CategorySummary, CreateProjectInput, DeleteProjectResult, Project, UpdateProjectInput,
+    STANDARD_FOLDERS,
 };
 use crate::path_security::ensure_under_root;
 use crate::project_paths::{self, sanitize_folder_name, AuthorizedRoot};
@@ -132,7 +134,7 @@ pub async fn create_project(
         return Err(AppError::msg("La raíz autorizada no es accesible"));
     }
 
-    let folder_name = if let Some(f) = input.folder_name.as_deref() {
+    let mut folder_name = if let Some(f) = input.folder_name.as_deref() {
         sanitize_folder_name(f)?
     } else if let Some(ref c) = code {
         c.clone()
@@ -140,7 +142,19 @@ pub async fn create_project(
         sanitize_folder_name(&name.replace(' ', "_"))?
     };
 
-    // Path collision independent of code
+    let conflict = input
+        .folder_conflict_policy
+        .as_deref()
+        .unwrap_or("abort")
+        .trim()
+        .to_ascii_lowercase();
+    if !matches!(conflict.as_str(), "abort" | "use_existing" | "rename") {
+        return Err(AppError::msg(
+            "Política de conflicto de carpeta inválida (abort|use_existing|rename)",
+        ));
+    }
+
+    // Path collision independent of code (another registered project)
     let existing_path: Option<(String,)> = sqlx::query_as(
         "SELECT id FROM projects WHERE authorized_root_id = ? AND root_relative_path = ?",
     )
@@ -154,22 +168,65 @@ pub async fn create_project(
         )));
     }
 
-    let project_dir = ensure_under_root(&root_path, &root_path.join(&folder_name))?;
+    let mut project_dir = ensure_under_root(&root_path, &root_path.join(&folder_name))?;
+    let mut used_existing = false;
     if project_dir.exists() {
-        return Err(AppError::msg(format!(
-            "Ya existe la carpeta física {folder_name} bajo la raíz. Use «Añadir existente» para vincularla."
-        )));
+        match conflict.as_str() {
+            "abort" => {
+                return Err(AppError::msg(format!(
+                    "FOLDER_EXISTS:{folder_name}:Ya existe la carpeta física bajo la raíz. Elija usar la existente, renombrar, o «Añadir existente»."
+                )));
+            }
+            "use_existing" => {
+                if !project_dir.is_dir() {
+                    return Err(AppError::msg(format!(
+                        "La ruta {folder_name} existe pero no es una carpeta"
+                    )));
+                }
+                used_existing = true;
+            }
+            "rename" => {
+                let base = folder_name.clone();
+                let mut n = 2u32;
+                loop {
+                    let candidate = format!("{base}_{n}");
+                    let cand_dir = ensure_under_root(&root_path, &root_path.join(&candidate))?;
+                    let registered: Option<(String,)> = sqlx::query_as(
+                        "SELECT id FROM projects WHERE authorized_root_id = ? AND root_relative_path = ?",
+                    )
+                    .bind(&root.id)
+                    .bind(&candidate)
+                    .fetch_optional(&state.pool)
+                    .await?;
+                    if registered.is_none() && !cand_dir.exists() {
+                        folder_name = candidate;
+                        project_dir = cand_dir;
+                        break;
+                    }
+                    n += 1;
+                    if n > 9999 {
+                        return Err(AppError::msg(
+                            "No se pudo generar un nombre de carpeta libre",
+                        ));
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
     }
 
-    std::fs::create_dir_all(&project_dir)?;
-    let create_folders = input.create_standard_folders.unwrap_or(true);
-    if create_folders {
-        for folder in STANDARD_FOLDERS {
-            let path = project_dir.join(folder.relative_path);
-            std::fs::create_dir_all(&path)?;
-            if folder.key == "transmisiones" {
-                std::fs::create_dir_all(path.join("ENVIADOS"))?;
-                std::fs::create_dir_all(path.join("RECIBIDOS"))?;
+    let import_mode = if used_existing { "linked" } else { "created" };
+    if !used_existing {
+        std::fs::create_dir_all(&project_dir)?;
+        let create_folders = input.create_standard_folders.unwrap_or(true);
+        if create_folders {
+            for folder in STANDARD_FOLDERS {
+                let path = project_dir.join(folder.relative_path);
+                std::fs::create_dir_all(&path)?;
+                if folder.key == "transmisiones" {
+                    std::fs::create_dir_all(path.join("ENVIADOS"))?;
+                    std::fs::create_dir_all(path.join("RECIBIDOS"))?;
+                }
             }
         }
     }
@@ -195,7 +252,7 @@ pub async fn create_project(
             start_date, end_date, last_opened_at, created_at, updated_at
          ) VALUES (
             ?, ?, ?, ?, ?, 'active',
-            ?, ?, 'created', 'standard',
+            ?, ?, ?, ?,
             ?, ?, datetime('now'), datetime('now'), datetime('now')
          )",
     )
@@ -206,25 +263,31 @@ pub async fn create_project(
     .bind(&client_name)
     .bind(&root.id)
     .bind(&folder_name)
+    .bind(import_mode)
+    .bind(if used_existing { "mapped" } else { "standard" })
     .bind(&input.start_date)
     .bind(&input.end_date)
     .execute(&mut *tx)
     .await?;
 
-    for folder in STANDARD_FOLDERS {
-        let cat_id = Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO categories (id, project_id, key, name, relative_path, sort_order)
-             VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&cat_id)
-        .bind(&id)
-        .bind(folder.key)
-        .bind(folder.name)
-        .bind(folder.relative_path)
-        .bind(folder.sort_order)
-        .execute(&mut *tx)
-        .await?;
+    if used_existing {
+        insert_mapped_categories(&mut tx, &id, &project_dir, false).await?;
+    } else {
+        for folder in STANDARD_FOLDERS {
+            let cat_id = Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO categories (id, project_id, key, name, relative_path, sort_order)
+                 VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&cat_id)
+            .bind(&id)
+            .bind(folder.key)
+            .bind(folder.name)
+            .bind(folder.relative_path)
+            .bind(folder.sort_order)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
 
     sqlx::query(
@@ -345,17 +408,218 @@ pub async fn archive_project(state: State<'_, AppState>, id: String) -> AppResul
 }
 
 #[tauri::command]
-pub async fn open_project(state: State<'_, AppState>, id: String) -> AppResult<Project> {
-    sqlx::query(
+pub async fn open_project(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> AppResult<Project> {
+    diagnostics::log_event("open", &format!("begin id={id}"));
+    let project = match fetch_project(&state, &id).await {
+        Ok(p) => p,
+        Err(e) => {
+            diagnostics::log_event("open", &format!("missing id={id}: {e}"));
+            return Err(e);
+        }
+    };
+
+    if let Err(e) = sqlx::query(
         "UPDATE projects SET last_opened_at = datetime('now'), updated_at = datetime('now')
          WHERE id = ?",
     )
     .bind(&id)
     .execute(&state.pool)
-    .await?;
-    // Reconcile Save-As / version patterns on open (best-effort).
-    let _ = crate::auto_version::reconcile_project(&state.pool, &id).await;
-    fetch_project(&state, &id).await
+    .await
+    {
+        diagnostics::log_event("open", &format!("timestamp update failed id={id}: {e}"));
+        // Still return the project — opening must stay recoverable.
+    }
+
+    // Heavy reconcile is cancelable and never blocks UI open.
+    let gen = state.begin_open_reconcile();
+    let pool = state.pool.clone();
+    let cancel = state.open_reconcile_cancel.clone();
+    let gen_cell = state.open_reconcile_generation.clone();
+    let project_id = id.clone();
+    tokio::spawn(async move {
+        diagnostics::log_event(
+            "reconcile",
+            &format!("start project={project_id} gen={gen}"),
+        );
+        match crate::auto_version::reconcile_project_cancelable(
+            &pool,
+            &project_id,
+            Some(cancel.as_ref()),
+            Some((gen_cell.as_ref(), gen)),
+        )
+        .await
+        {
+            Ok(results) => {
+                diagnostics::log_event(
+                    "reconcile",
+                    &format!(
+                        "done project={project_id} gen={gen} results={}",
+                        results.len()
+                    ),
+                );
+                let _ = app.emit(
+                    "open-reconcile",
+                    serde_json::json!({
+                        "projectId": project_id,
+                        "generation": gen,
+                        "ok": true,
+                        "resultCount": results.len(),
+                    }),
+                );
+            }
+            Err(e) => {
+                diagnostics::log_event(
+                    "reconcile",
+                    &format!("error project={project_id} gen={gen}: {e}"),
+                );
+                let _ = app.emit(
+                    "open-reconcile",
+                    serde_json::json!({
+                        "projectId": project_id,
+                        "generation": gen,
+                        "ok": false,
+                        "message": e.to_string(),
+                    }),
+                );
+            }
+        }
+    });
+
+    diagnostics::log_event(
+        "open",
+        &format!(
+            "ready id={id} code={}",
+            project.code.as_deref().unwrap_or("-")
+        ),
+    );
+    Ok(project)
+}
+
+#[tauri::command]
+pub async fn cancel_open_reconcile(state: State<'_, AppState>) -> AppResult<()> {
+    state.cancel_open_reconcile();
+    diagnostics::log_event("reconcile", "cancel requested");
+    Ok(())
+}
+
+/// Remove project from SQLite only — keep files on disk.
+#[tauri::command]
+pub async fn remove_project_from_app(
+    state: State<'_, AppState>,
+    id: String,
+) -> AppResult<DeleteProjectResult> {
+    delete_project_inner(&state, &id, false, None).await
+}
+
+/// Delete project registration and send physical folder to the OS recycle bin.
+/// Linked projects are register-only (files untouched).
+/// `confirm_code` must match the project business code when one is set.
+#[tauri::command]
+pub async fn delete_project_with_files(
+    state: State<'_, AppState>,
+    id: String,
+    confirm_code: Option<String>,
+) -> AppResult<DeleteProjectResult> {
+    delete_project_inner(&state, &id, true, confirm_code.as_deref()).await
+}
+
+async fn delete_project_inner(
+    state: &AppState,
+    id: &str,
+    delete_files: bool,
+    confirm_code: Option<&str>,
+) -> AppResult<DeleteProjectResult> {
+    let project = fetch_project(state, id).await?;
+    if delete_files {
+        let expected = project
+            .code
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(project.root_relative_path.trim());
+        let provided = confirm_code.map(str::trim).unwrap_or("");
+        if provided != expected {
+            return Err(AppError::msg(format!(
+                "CONFIRM_CODE:Escriba «{expected}» para confirmar la eliminación"
+            )));
+        }
+    }
+
+    // Cancel any reconcile targeting this project.
+    state.cancel_open_reconcile();
+
+    let loc = project_paths::resolve_project_location(&state.pool, id).await?;
+    let is_linked = project.import_mode == "linked";
+    let (files_action, message) = if delete_files && !is_linked {
+        if loc.absolute_path.is_dir() {
+            // Safety: refuse deleting the authorized root itself.
+            if loc.absolute_path == loc.root_path {
+                return Err(AppError::msg(
+                    "No se puede enviar la raíz autorizada a la papelera",
+                ));
+            }
+            trash::delete(&loc.absolute_path).map_err(|e| {
+                AppError::msg(format!(
+                    "No se pudo enviar la carpeta a la papelera del sistema: {e}"
+                ))
+            })?;
+            diagnostics::log_event(
+                "delete",
+                &format!(
+                    "recycled id={id} path={}",
+                    loc.absolute_path.display()
+                ),
+            );
+            (
+                "recycled".to_string(),
+                "Proyecto eliminado y carpeta enviada a la papelera del sistema.".to_string(),
+            )
+        } else {
+            (
+                "missing".to_string(),
+                "Proyecto eliminado del registro; la carpeta física ya no existía.".to_string(),
+            )
+        }
+    } else if delete_files && is_linked {
+        (
+            "register_only".to_string(),
+            "Proyecto vinculado: solo se eliminó el registro (archivos intactos).".to_string(),
+        )
+    } else {
+        (
+            "kept".to_string(),
+            "Proyecto quitado de IngManager; los archivos se conservan.".to_string(),
+        )
+    };
+
+    // FTS has no FK cascade.
+    sqlx::query("DELETE FROM search_fts WHERE project_id = ? OR entity_id = ?")
+        .bind(id)
+        .bind(id)
+        .execute(&state.pool)
+        .await
+        .ok();
+
+    sqlx::query("DELETE FROM projects WHERE id = ?")
+        .bind(id)
+        .execute(&state.pool)
+        .await?;
+
+    diagnostics::log_event(
+        "delete",
+        &format!("db_removed id={id} files_action={files_action}"),
+    );
+
+    Ok(DeleteProjectResult {
+        id: id.to_string(),
+        code: project.code,
+        files_action,
+        message,
+    })
 }
 
 #[tauri::command]

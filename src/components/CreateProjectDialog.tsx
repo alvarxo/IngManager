@@ -21,6 +21,9 @@ export function CreateProjectDialog({ open, onClose }: Props) {
   const [useSuggestedCode, setUseSuggestedCode] = useState(true);
   const [rootId, setRootId] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
+  const [folderConflict, setFolderConflict] = useState<{
+    folderName: string;
+  } | null>(null);
 
   const codeQuery = useQuery({
     queryKey: ["next-code"],
@@ -45,6 +48,7 @@ export function CreateProjectDialog({ open, onClose }: Props) {
       setUseSuggestedCode(true);
       setRootId("");
       setError(null);
+      setFolderConflict(null);
     }
   }, [open]);
 
@@ -63,7 +67,7 @@ export function CreateProjectDialog({ open, onClose }: Props) {
   }, [rootsQuery.data, rootId]);
 
   const mutation = useMutation({
-    mutationFn: () =>
+    mutationFn: (policy: string = "abort") =>
       api.createProject({
         name,
         client_name: clientName || null,
@@ -73,21 +77,37 @@ export function CreateProjectDialog({ open, onClose }: Props) {
         folder_name: folderName.trim() || null,
         authorized_root_id: rootId || null,
         create_standard_folders: true,
+        folder_conflict_policy: policy,
       }),
     onSuccess: async (project) => {
+      setFolderConflict(null);
       await qc.invalidateQueries({ queryKey: ["projects"] });
       await qc.invalidateQueries({ queryKey: ["recent-projects"] });
       await qc.invalidateQueries({ queryKey: ["app-status"] });
       onClose();
-      await api.openProject(project.id);
       setView({ kind: "project", projectId: project.id });
+      try {
+        await api.openProject(project.id);
+      } catch {
+        /* open errors are non-fatal after create */
+      }
       try {
         await api.reindexRoot();
       } catch {
         /* optional */
       }
     },
-    onError: (e: Error) => setError(String(e)),
+    onError: (e: Error) => {
+      const msg = String(e).replace(/^Error:\s*/, "");
+      if (msg.startsWith("FOLDER_EXISTS:")) {
+        const parts = msg.split(":");
+        setFolderConflict({ folderName: parts[1] ?? "" });
+        setError(parts.slice(2).join(":") || msg);
+        return;
+      }
+      setFolderConflict(null);
+      setError(msg);
+    },
   });
 
   if (!open) return null;
@@ -195,6 +215,33 @@ export function CreateProjectDialog({ open, onClose }: Props) {
               {error}
             </div>
           )}
+          {folderConflict && (
+            <div className="space-y-2 border border-warn/40 bg-warn/10 px-3 py-2 text-[12.5px]">
+              <p>
+                Conflicto con la carpeta física{" "}
+                <span className="font-mono">{folderConflict.folderName}</span>.
+                Elija cómo recrear el proyecto (p. ej. código 1090):
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={mutation.isPending}
+                  onClick={() => mutation.mutate("use_existing")}
+                >
+                  Usar carpeta existente
+                </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={mutation.isPending}
+                  onClick={() => mutation.mutate("rename")}
+                >
+                  Crear con otro nombre
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
@@ -203,7 +250,7 @@ export function CreateProjectDialog({ open, onClose }: Props) {
           </Button>
           <Button
             disabled={!name.trim() || mutation.isPending}
-            onClick={() => mutation.mutate()}
+            onClick={() => mutation.mutate("abort")}
           >
             {mutation.isPending ? "Creando…" : "Crear proyecto"}
           </Button>

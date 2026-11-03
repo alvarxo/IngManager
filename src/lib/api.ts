@@ -11,6 +11,7 @@ import type {
   CreateRevisionInput,
   CreateSentTransmissionInput,
   CreateVersionInput,
+  DeleteProjectResult,
   DocumentFileRow,
   DocumentRow,
   DocumentVersionRow,
@@ -89,6 +90,14 @@ export const api = {
     invoke<Project>("update_project", { input }),
   archiveProject: (id: string) => invoke<Project>("archive_project", { id }),
   openProject: (id: string) => invoke<Project>("open_project", { id }),
+  cancelOpenReconcile: () => invoke<void>("cancel_open_reconcile"),
+  removeProjectFromApp: (id: string) =>
+    invoke<DeleteProjectResult>("remove_project_from_app", { id }),
+  deleteProjectWithFiles: (id: string, confirmCode?: string | null) =>
+    invoke<DeleteProjectResult>("delete_project_with_files", {
+      id,
+      confirmCode: confirmCode ?? null,
+    }),
   getProjectAbsolutePath: (projectId: string) =>
     invoke<string>("get_project_absolute_path", { projectId }),
   listProjectCategories: (projectId: string) =>
@@ -96,6 +105,8 @@ export const api = {
   listRecentProjects: (limit = 8) =>
     invoke<Project[]>("list_recent_projects", { limit }),
   listFavoriteProjects: () => invoke<Project[]>("list_favorite_projects"),
+  getDiagnosticsDir: () => invoke<string>("get_diagnostics_dir"),
+  openDiagnosticsFolder: () => invoke<void>("open_diagnostics_folder"),
 
   listCategoryFiles: (projectId: string, categoryKey: string) =>
     invoke<IndexedFile[]>("list_category_files", { projectId, categoryKey }),

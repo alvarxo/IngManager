@@ -6,6 +6,7 @@ mod commands;
 mod db;
 #[cfg(test)]
 mod db_tests;
+mod diagnostics;
 mod doc_codes;
 mod engineering_files;
 #[cfg(test)]
@@ -26,6 +27,8 @@ mod models;
 mod organizer_inbox_tests;
 mod organizer;
 mod path_security;
+#[cfg(test)]
+mod project_lifecycle_tests;
 mod project_paths;
 mod search_index;
 mod state;
@@ -63,9 +66,14 @@ pub fn run() {
             commands::projects::update_project,
             commands::projects::archive_project,
             commands::projects::open_project,
+            commands::projects::cancel_open_reconcile,
+            commands::projects::remove_project_from_app,
+            commands::projects::delete_project_with_files,
             commands::projects::list_project_categories,
             commands::projects::list_recent_projects,
             commands::projects::list_favorite_projects,
+            commands::settings::get_diagnostics_dir,
+            commands::settings::open_diagnostics_folder,
             commands::files::list_category_files,
             commands::files::open_file,
             commands::files::reveal_in_explorer,

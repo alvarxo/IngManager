@@ -186,6 +186,8 @@ export interface DocumentRow {
   current_version_label: string | null;
   file_count: number;
   has_unregistered_change: number;
+  current_revision_code: string | null;
+  current_revision_status: string | null;
 }
 
 export interface CreateDocumentInput {
@@ -408,6 +410,8 @@ export interface CreateRevisionInput {
   document_version_id?: string | null;
   file_paths?: string[] | null;
   format_labels?: string[] | null;
+  /** Default true: snapshot currently linked working formats. */
+  freeze_linked?: boolean | null;
 }
 
 export interface AttachFileInput {

@@ -564,10 +564,25 @@ export function DocumentInspector() {
             {isPlanosOrMemorias && (
               <>
                 <div className="pt-2 text-[11px] font-semibold uppercase text-muted">
-                  Revisiones emitidas
+                  Revisiones (borrador / emitida)
                 </div>
+                {d.current_revision_code && (
+                  <p className="text-[12px]">
+                    Actual:{" "}
+                    <span className="font-mono text-accent">
+                      {d.current_revision_code}
+                    </span>{" "}
+                    <span className="text-[11px] text-muted">
+                      (
+                      {d.current_revision_status === "issued"
+                        ? "emitida"
+                        : "borrador"}
+                      )
+                    </span>
+                  </p>
+                )}
                 {(revisions.data?.length ?? 0) === 0 && (
-                  <p className="text-[12px] text-muted">Sin revisiones emitidas.</p>
+                  <p className="text-[12px] text-muted">Sin revisiones registradas.</p>
                 )}
                 <ul className="space-y-1">
                   {revisions.data?.map((r) => (
@@ -580,45 +595,104 @@ export function DocumentInspector() {
                         {r.issued_at
                           ? new Date(r.issued_at).toLocaleDateString()
                           : "sin fecha"}{" "}
-                        · {r.status ?? "issued"}
+                        ·{" "}
+                        {r.status === "issued"
+                          ? "emitida"
+                          : r.status === "draft"
+                            ? "borrador"
+                            : (r.status ?? "—")}
                       </div>
                       {r.notes && <div className="text-muted">{r.notes}</div>}
                     </li>
                   ))}
                 </ul>
-                <Button
-                  size="sm"
-                  onClick={async () => {
-                    const code = window.prompt("Código de revisión emitida (ej. A, 0, R1)");
-                    if (!code) return;
-                    const picked = await open({
-                      multiple: true,
-                      title: "Formatos de la revisión (PDF, DWG, …)",
-                    });
-                    const paths = !picked
-                      ? []
-                      : Array.isArray(picked)
-                        ? picked
-                        : [picked];
-                    await api.createRevision({
-                      document_id: documentId,
-                      revision_code: code,
-                      issued_at: new Date().toISOString().slice(0, 10),
-                      document_version_id: d.current_version_id,
-                      file_paths: paths,
-                      format_labels: paths.map((p) => {
-                        const ext = p.split(".").pop()?.toUpperCase();
-                        return ext ?? "FILE";
-                      }),
-                    });
-                    await qc.invalidateQueries({
-                      queryKey: ["doc-revisions", documentId],
-                    });
-                    await qc.invalidateQueries({ queryKey: ["doc-version-files"] });
-                  }}
-                >
-                  Emitir revisión…
-                </Button>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    onClick={async () => {
+                      const code = window.prompt(
+                        "Código de revisión (A→B borrador; 0→1→2 emitida). Congela formatos vinculados.",
+                      );
+                      if (!code) return;
+                      const addMore = window.confirm(
+                        "¿Agregar archivos extra además de congelar los vinculados?\nCancelar = solo congelar vinculados.",
+                      );
+                      let paths: string[] = [];
+                      if (addMore) {
+                        const picked = await open({
+                          multiple: true,
+                          title: "Formatos adicionales (PDF, DOCX, …)",
+                        });
+                        paths = !picked
+                          ? []
+                          : Array.isArray(picked)
+                            ? picked
+                            : [picked];
+                      }
+                      try {
+                        await api.createRevision({
+                          document_id: documentId,
+                          revision_code: code,
+                          issued_at: new Date().toISOString().slice(0, 10),
+                          document_version_id: d.current_version_id,
+                          freeze_linked: true,
+                          file_paths: paths,
+                          format_labels: paths.map((p) => {
+                            const ext = p.split(".").pop()?.toUpperCase();
+                            return ext ?? "FILE";
+                          }),
+                        });
+                        await qc.invalidateQueries({
+                          queryKey: ["doc-revisions", documentId],
+                        });
+                        await qc.invalidateQueries({
+                          queryKey: ["doc-version-files"],
+                        });
+                        await qc.invalidateQueries({
+                          queryKey: ["document", documentId],
+                        });
+                        await qc.invalidateQueries({ queryKey: ["documents"] });
+                      } catch (e) {
+                        window.alert(String(e));
+                      }
+                    }}
+                  >
+                    Emitir revisión…
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={async () => {
+                      if (
+                        !window.confirm(
+                          "¿Reparar versiones mal asignadas → revisiones (_RA/_RB/_R0)?",
+                        )
+                      ) {
+                        return;
+                      }
+                      try {
+                        const r = await api.repairDocumentRevisions(documentId);
+                        await qc.invalidateQueries({
+                          queryKey: ["doc-revisions", documentId],
+                        });
+                        await qc.invalidateQueries({
+                          queryKey: ["doc-versions", documentId],
+                        });
+                        await qc.invalidateQueries({
+                          queryKey: ["document", documentId],
+                        });
+                        await qc.invalidateQueries({ queryKey: ["documents"] });
+                        window.alert(
+                          `Reparación: ${r.revisions_created} revisión(es), ${r.files_reassigned} archivo(s), ${r.empty_versions_removed} versión(es) vacía(s) quitadas. Actual: ${r.current_revision_code ?? "—"}.`,
+                        );
+                      } catch (e) {
+                        window.alert(String(e));
+                      }
+                    }}
+                  >
+                    Reparar revisiones…
+                  </Button>
+                </div>
               </>
             )}
           </>

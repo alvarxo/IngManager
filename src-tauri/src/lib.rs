@@ -7,6 +7,7 @@ mod db;
 #[cfg(test)]
 mod db_tests;
 mod doc_codes;
+mod doc_revisions;
 mod engineering_files;
 #[cfg(test)]
 mod engineering_sap_tests;
@@ -14,6 +15,8 @@ mod engineering_sap_tests;
 mod models_versions_hotfix_tests;
 #[cfg(test)]
 mod usability_versions_hotfix_tests;
+#[cfg(test)]
+mod memory_revisions_hotfix_tests;
 mod error;
 #[cfg(test)]
 mod flexibility_tests;
@@ -97,6 +100,7 @@ pub fn run() {
             commands::documents::open_document_principal,
             commands::documents::list_revisions,
             commands::documents::create_revision,
+            commands::documents::repair_document_revisions,
             commands::documents::list_subcategories,
             commands::documents::create_subcategory,
             commands::documents::update_subcategory,

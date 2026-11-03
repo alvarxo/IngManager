@@ -34,6 +34,10 @@ pub struct DocumentRow {
     pub current_version_label: Option<String>,
     pub file_count: i64,
     pub has_unregistered_change: i64,
+    /// Latest revision by engineering sequence (A→B→0→1→2), if any.
+    pub current_revision_code: Option<String>,
+    /// `draft` (letter) or `issued` (numeric), when a revision exists.
+    pub current_revision_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -158,6 +162,22 @@ pub struct CreateRevisionInput {
     pub document_version_id: Option<String>,
     pub file_paths: Option<Vec<String>>,
     pub format_labels: Option<Vec<String>>,
+    /// When true (default), snapshot currently linked working formats onto the revision.
+    pub freeze_linked: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepairRevisionsInput {
+    pub document_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepairRevisionsResult {
+    pub document_id: String,
+    pub revisions_created: usize,
+    pub files_reassigned: usize,
+    pub empty_versions_removed: usize,
+    pub current_revision_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -254,7 +274,9 @@ async fn fetch_document(state: &AppState, id: &str) -> AppResult<DocumentRow> {
                 SELECT COUNT(*) FROM document_files f
                 WHERE f.document_version_id = d.current_version_id AND f.is_available = 1
             ), 0) AS file_count,
-            0 AS has_unregistered_change
+            0 AS has_unregistered_change,
+            NULL AS current_revision_code,
+            NULL AS current_revision_status
          FROM documents d
          LEFT JOIN categories c ON c.id = d.category_id
          LEFT JOIN document_versions v ON v.id = d.current_version_id
@@ -309,6 +331,53 @@ async fn enrich_change_flags(
     Ok(docs)
 }
 
+/// Fill `current_revision_*` using engineering sequence A→B→0→1→2 (latest wins).
+async fn enrich_current_revisions(
+    state: &AppState,
+    mut docs: Vec<DocumentRow>,
+) -> AppResult<Vec<DocumentRow>> {
+    if docs.is_empty() {
+        return Ok(docs);
+    }
+    let ids: Vec<String> = docs.iter().map(|d| d.id.clone()).collect();
+    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT document_id, revision_code, status FROM revisions WHERE document_id IN ({placeholders})"
+    );
+    let mut q = sqlx::query_as::<_, (String, String, Option<String>)>(&sql);
+    for id in &ids {
+        q = q.bind(id);
+    }
+    let rows = q.fetch_all(&state.pool).await?;
+    use std::collections::HashMap;
+    let mut by_doc: HashMap<String, Vec<(String, Option<String>)>> = HashMap::new();
+    for (doc_id, code, status) in rows {
+        by_doc.entry(doc_id).or_default().push((code, status));
+    }
+    for doc in &mut docs {
+        if let Some(list) = by_doc.get_mut(&doc.id) {
+            list.sort_by(|a, b| crate::doc_revisions::cmp_revision_codes(&a.0, &b.0));
+            if let Some((code, status)) = list.last() {
+                doc.current_revision_code = Some(code.clone());
+                doc.current_revision_status = Some(
+                    status
+                        .clone()
+                        .unwrap_or_else(|| crate::doc_revisions::status_for_code(code).to_string()),
+                );
+            }
+        }
+    }
+    Ok(docs)
+}
+
+async fn enrich_documents(
+    state: &AppState,
+    docs: Vec<DocumentRow>,
+) -> AppResult<Vec<DocumentRow>> {
+    let docs = enrich_current_revisions(state, docs).await?;
+    enrich_change_flags(state, docs).await
+}
+
 #[tauri::command]
 pub async fn list_documents(
     state: State<'_, AppState>,
@@ -331,7 +400,9 @@ pub async fn list_documents(
                     SELECT COUNT(*) FROM document_files f
                     WHERE f.document_version_id = d.current_version_id AND f.is_available = 1
                 ), 0) AS file_count,
-                0 AS has_unregistered_change
+                0 AS has_unregistered_change,
+                NULL AS current_revision_code,
+                NULL AS current_revision_status
              FROM documents d
              LEFT JOIN categories c ON c.id = d.category_id
              LEFT JOIN document_versions v ON v.id = d.current_version_id
@@ -355,7 +426,9 @@ pub async fn list_documents(
                     SELECT COUNT(*) FROM document_files f
                     WHERE f.document_version_id = d.current_version_id AND f.is_available = 1
                 ), 0) AS file_count,
-                0 AS has_unregistered_change
+                0 AS has_unregistered_change,
+                NULL AS current_revision_code,
+                NULL AS current_revision_status
              FROM documents d
              LEFT JOIN categories c ON c.id = d.category_id
              LEFT JOIN document_versions v ON v.id = d.current_version_id
@@ -367,13 +440,13 @@ pub async fn list_documents(
         .await?
     };
 
-    enrich_change_flags(&state, docs).await
+    enrich_documents(&state, docs).await
 }
 
 #[tauri::command]
 pub async fn get_document(state: State<'_, AppState>, id: String) -> AppResult<DocumentRow> {
     let doc = fetch_document(&state, &id).await?;
-    Ok(enrich_change_flags(&state, vec![doc])
+    Ok(enrich_documents(&state, vec![doc])
         .await?
         .into_iter()
         .next()
@@ -1171,25 +1244,7 @@ pub async fn open_document_principal_inner(
     document_id: &str,
     use_temp_copy: Option<bool>,
 ) -> AppResult<String> {
-    let doc = fetch_document(state, document_id).await?;
-    let version_id = doc
-        .current_version_id
-        .ok_or_else(|| AppError::msg("El documento no tiene versión actual"))?;
-    let files = list_version_files_inner(state, &version_id).await?;
-    let available: Vec<_> = files
-        .into_iter()
-        .filter(|f| f.is_available != 0)
-        .collect();
-    if available.is_empty() {
-        return Err(AppError::msg("No hay archivos disponibles para abrir"));
-    }
-    let pick = crate::engineering_files::pick_principal_open_index(
-        available
-            .iter()
-            .map(|f| (f.file_name.as_str(), f.extension.as_deref())),
-    )
-    .unwrap_or(0);
-    let file_id = available[pick].id.clone();
+    let file_id = resolve_document_principal_file_id(state, document_id).await?;
     open_document_file_by_id(state, &file_id, use_temp_copy).await
 }
 
@@ -1238,11 +1293,17 @@ async fn open_document_file_by_id(
 }
 
 /// Resolve principal file id without opening (for tests / UI previews).
+/// Prefer draft DOCX (editable, non-snapshot) of the current revision when present.
 pub async fn resolve_document_principal_file_id(
     state: &AppState,
     document_id: &str,
 ) -> AppResult<String> {
-    let doc = fetch_document(state, document_id).await?;
+    let docs =
+        enrich_current_revisions(state, vec![fetch_document(state, document_id).await?]).await?;
+    let doc = docs
+        .into_iter()
+        .next()
+        .ok_or_else(|| AppError::msg("Documento no encontrado"))?;
     let version_id = doc
         .current_version_id
         .ok_or_else(|| AppError::msg("El documento no tiene versión actual"))?;
@@ -1254,6 +1315,38 @@ pub async fn resolve_document_principal_file_id(
     if available.is_empty() {
         return Err(AppError::msg("No hay archivos disponibles"));
     }
+
+    let current_rev = doc.current_revision_code.clone();
+    // 1) DOCX matching current revision code (draft editable)
+    if let Some(code) = &current_rev {
+        if let Some(f) = available.iter().find(|f| {
+            let ext = f.extension.as_deref().unwrap_or("").to_ascii_lowercase();
+            if ext != "docx" && ext != "doc" {
+                return false;
+            }
+            let rel = f.relative_path.replace('\\', "/");
+            if rel.contains(".ingmanager/snapshots/") {
+                return false;
+            }
+            crate::doc_revisions::parse_revision_filename(&f.file_name)
+                .map(|p| p.revision_code == *code)
+                .unwrap_or(false)
+        }) {
+            return Ok(f.id.clone());
+        }
+    }
+    // 2) Any non-snapshot DOCX/DOC
+    if let Some(f) = available.iter().find(|f| {
+        let ext = f.extension.as_deref().unwrap_or("").to_ascii_lowercase();
+        (ext == "docx" || ext == "doc")
+            && !f
+                .relative_path
+                .replace('\\', "/")
+                .contains(".ingmanager/snapshots/")
+    }) {
+        return Ok(f.id.clone());
+    }
+
     let pick = crate::engineering_files::pick_principal_open_index(
         available
             .iter()
@@ -1261,6 +1354,140 @@ pub async fn resolve_document_principal_file_id(
     )
     .unwrap_or(0);
     Ok(available[pick].id.clone())
+}
+
+/// Repair mis-assigned internal versions → issued/draft revisions for memorias/planos.
+#[tauri::command]
+pub async fn repair_document_revisions(
+    state: State<'_, AppState>,
+    input: RepairRevisionsInput,
+) -> AppResult<RepairRevisionsResult> {
+    repair_document_revisions_inner(&state, input).await
+}
+
+pub async fn repair_document_revisions_inner(
+    state: &AppState,
+    input: RepairRevisionsInput,
+) -> AppResult<RepairRevisionsResult> {
+    let doc = fetch_document(state, &input.document_id).await?;
+    let cat = doc.category_key.as_deref().unwrap_or("");
+    if !crate::doc_revisions::category_uses_revisions(cat) {
+        return Err(AppError::msg(
+            "La reparación de revisiones aplica a memorias y planos",
+        ));
+    }
+    let current_vid = doc
+        .current_version_id
+        .clone()
+        .ok_or_else(|| AppError::msg("El documento no tiene versión actual"))?;
+
+    let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT f.id, f.file_name, f.document_version_id, f.revision_id
+         FROM document_files f
+         JOIN document_versions v ON v.id = f.document_version_id
+         WHERE v.document_id = ? AND f.is_available = 1",
+    )
+    .bind(&input.document_id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let mut revisions_created = 0usize;
+    let mut files_reassigned = 0usize;
+
+    for (file_id, file_name, version_id, existing_rev) in &rows {
+        let Some(parsed) = crate::doc_revisions::parse_revision_filename(file_name) else {
+            continue;
+        };
+        let before: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM revisions WHERE document_id = ? AND revision_code = ?",
+        )
+        .bind(&input.document_id)
+        .bind(&parsed.revision_code)
+        .fetch_one(&state.pool)
+        .await?;
+
+        let rev_id = crate::incorporation::ensure_revision_row(
+            &state.pool,
+            &input.document_id,
+            &current_vid,
+            &parsed.revision_code,
+        )
+        .await?;
+        if before.0 == 0 {
+            revisions_created += 1;
+        }
+
+        if existing_rev.as_deref() != Some(rev_id.as_str()) {
+            sqlx::query("UPDATE document_files SET revision_id = ? WHERE id = ?")
+                .bind(&rev_id)
+                .bind(file_id)
+                .execute(&state.pool)
+                .await?;
+            files_reassigned += 1;
+        }
+
+        if version_id != &current_vid {
+            sqlx::query("UPDATE document_files SET document_version_id = ? WHERE id = ?")
+                .bind(&current_vid)
+                .bind(file_id)
+                .execute(&state.pool)
+                .await?;
+        }
+    }
+
+    let empty_versions: Vec<(String,)> = sqlx::query_as(
+        "SELECT v.id FROM document_versions v
+         WHERE v.document_id = ? AND v.id != ?
+           AND NOT EXISTS (
+             SELECT 1 FROM document_files f
+             WHERE f.document_version_id = v.id AND f.is_available = 1
+           )",
+    )
+    .bind(&input.document_id)
+    .bind(&current_vid)
+    .fetch_all(&state.pool)
+    .await?;
+    let mut empty_versions_removed = 0usize;
+    for (vid,) in empty_versions {
+        sqlx::query("DELETE FROM document_files WHERE document_version_id = ?")
+            .bind(&vid)
+            .execute(&state.pool)
+            .await?;
+        sqlx::query("DELETE FROM document_versions WHERE id = ?")
+            .bind(&vid)
+            .execute(&state.pool)
+            .await?;
+        empty_versions_removed += 1;
+    }
+
+    let version_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM document_versions WHERE document_id = ?")
+            .bind(&input.document_id)
+            .fetch_one(&state.pool)
+            .await?;
+    if version_count.0 == 1 {
+        sqlx::query(
+            "UPDATE document_versions SET version_number = 1, label = 'v01' WHERE id = ?",
+        )
+        .bind(&current_vid)
+        .execute(&state.pool)
+        .await?;
+    }
+
+    let enriched =
+        enrich_current_revisions(state, vec![fetch_document(state, &input.document_id).await?])
+            .await?;
+    let current_revision_code = enriched
+        .first()
+        .and_then(|d| d.current_revision_code.clone());
+
+    Ok(RepairRevisionsResult {
+        document_id: input.document_id,
+        revisions_created,
+        files_reassigned,
+        empty_versions_removed,
+        current_revision_code,
+    })
 }
 
 async fn insert_unavailable_file_row(
@@ -1409,51 +1636,180 @@ pub async fn create_revision(
     state: State<'_, AppState>,
     input: CreateRevisionInput,
 ) -> AppResult<RevisionRow> {
+    create_revision_inner(&state, input).await
+}
+
+pub async fn create_revision_inner(
+    state: &AppState,
+    input: CreateRevisionInput,
+) -> AppResult<RevisionRow> {
     let code = input.revision_code.trim().to_string();
     if code.is_empty() {
         return Err(AppError::msg("El código de revisión es obligatorio"));
     }
+    // Normalize RA/RB/R0 / RevA → A/B/0
+    let code = crate::doc_revisions::parse_revision_filename(&format!("x_{code}.docx"))
+        .map(|p| p.revision_code)
+        .or_else(|| {
+            let (base, parsed) = crate::doc_revisions::strip_revision_suffix(&format!("x_{code}"));
+            let _ = base;
+            parsed.map(|p| p.revision_code)
+        })
+        .unwrap_or_else(|| {
+            // bare A / 0 already
+            let status_probe = crate::doc_revisions::status_for_code(&code);
+            let _ = status_probe;
+            code.clone()
+        });
 
-    let id = Uuid::new_v4().to_string();
-    sqlx::query(
-        "INSERT INTO revisions (
-            id, document_id, revision_code, issued_at, notes, created_at,
-            document_version_id, status
-         ) VALUES (?, ?, ?, ?, ?, datetime('now'), ?, 'issued')",
+    let doc = fetch_document(state, &input.document_id).await?;
+    let version_id = input
+        .document_version_id
+        .clone()
+        .or(doc.current_version_id.clone())
+        .ok_or_else(|| AppError::msg("El documento no tiene versión actual"))?;
+
+    let freeze_linked = input.freeze_linked.unwrap_or(true);
+    let extra_paths = input.file_paths.clone().unwrap_or_default();
+    if !freeze_linked && extra_paths.is_empty() {
+        return Err(AppError::msg(
+            "No se puede emitir una revisión vacía: indique formatos o congele los vinculados",
+        ));
+    }
+
+    let status = crate::doc_revisions::status_for_code(&code);
+    let issued_at = input.issued_at.clone().or_else(|| {
+        if status == "issued" {
+            Some(chrono::Utc::now().format("%Y-%m-%d").to_string())
+        } else {
+            None
+        }
+    });
+
+    // Reuse existing revision row for same code when present
+    let existing: Option<(String,)> = sqlx::query_as(
+        "SELECT id FROM revisions WHERE document_id = ? AND revision_code = ? LIMIT 1",
     )
-    .bind(&id)
     .bind(&input.document_id)
     .bind(&code)
-    .bind(&input.issued_at)
-    .bind(&input.notes)
-    .bind(&input.document_version_id)
-    .execute(&state.pool)
+    .fetch_optional(&state.pool)
     .await?;
 
-    // Issued revision formats are snapshotted (historical freeze). Working
-    // editable files on the version remain linked separately.
-    if let Some(paths) = input.file_paths {
-        let version_id = if let Some(v) = input.document_version_id.clone() {
-            v
-        } else {
-            let doc = fetch_document(&state, &input.document_id).await?;
-            doc.current_version_id
-                .ok_or_else(|| AppError::msg("El documento no tiene versión actual"))?
-        };
-        let labels = input.format_labels.unwrap_or_default();
-        for (i, path) in paths.iter().enumerate() {
-            let label = labels.get(i).cloned();
-            let _ = attach_file_inner(
-                &state,
+    let was_existing = existing.is_some();
+    let id = if let Some((eid,)) = existing {
+        sqlx::query(
+            "UPDATE revisions SET issued_at = COALESCE(?, issued_at), notes = COALESCE(?, notes),
+                document_version_id = ?, status = ? WHERE id = ?",
+        )
+        .bind(&issued_at)
+        .bind(&input.notes)
+        .bind(&version_id)
+        .bind(status)
+        .bind(&eid)
+        .execute(&state.pool)
+        .await?;
+        eid
+    } else {
+        let id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO revisions (
+                id, document_id, revision_code, issued_at, notes, created_at,
+                document_version_id, status
+             ) VALUES (?, ?, ?, ?, ?, datetime('now'), ?, ?)",
+        )
+        .bind(&id)
+        .bind(&input.document_id)
+        .bind(&code)
+        .bind(&issued_at)
+        .bind(&input.notes)
+        .bind(&version_id)
+        .bind(status)
+        .execute(&state.pool)
+        .await?;
+        id
+    };
+
+    let loc = loc_for_document(state, &input.document_id).await?;
+    let mut frozen = 0usize;
+
+    // Emitir revisión: freeze currently linked working formats (snapshot copies).
+    // Include draft-linked working files (revision_id may already point at A/B).
+    if freeze_linked {
+        let linked: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT id, relative_path, format_label FROM document_files
+             WHERE document_version_id = ? AND is_available = 1
+               AND relative_path NOT LIKE '%/.ingmanager/snapshots/%'
+               AND relative_path NOT LIKE '%.ingmanager/snapshots/%'",
+        )
+        .bind(&version_id)
+        .fetch_all(&state.pool)
+        .await?;
+
+        for (_fid, rel, label) in &linked {
+            let abs = match crate::path_security::join_under_root(&loc.root_path, rel) {
+                Ok(p) if p.is_file() => p,
+                _ => continue,
+            };
+            match crate::incorporation::snapshot_file_to_version(
+                &state.pool,
+                &loc,
+                &input.document_id,
                 &version_id,
-                path,
-                label,
-                Some(id.clone()),
-                true, // snapshot issued formats
-                Some("issued_revision".into()),
+                doc.current_version_number.unwrap_or(1),
+                &abs,
+                label.as_deref(),
+                Some("issued_revision"),
+                Some(&id),
             )
+            .await
+            {
+                Ok(_) => frozen += 1,
+                Err(e) => {
+                    return Err(AppError::msg(format!(
+                        "No se pudo congelar {}: {e}",
+                        abs.display()
+                    )));
+                }
+            }
+            // Point the working link at this revision as well (no re-copy of working file)
+            sqlx::query(
+                "UPDATE document_files SET revision_id = ? WHERE document_version_id = ? AND relative_path = ?",
+            )
+            .bind(&id)
+            .bind(&version_id)
+            .bind(rel)
+            .execute(&state.pool)
             .await?;
         }
+    }
+
+    let labels = input.format_labels.unwrap_or_default();
+    for (i, path) in extra_paths.iter().enumerate() {
+        let label = labels.get(i).cloned();
+        attach_file_inner(
+            state,
+            &version_id,
+            path,
+            label,
+            Some(id.clone()),
+            true, // snapshot issued formats
+            Some("issued_revision".into()),
+        )
+        .await?;
+        frozen += 1;
+    }
+
+    if frozen == 0 {
+        // Roll back empty revision row when newly created
+        if !was_existing {
+            sqlx::query("DELETE FROM revisions WHERE id = ?")
+                .bind(&id)
+                .execute(&state.pool)
+                .await?;
+        }
+        return Err(AppError::msg(
+            "Revisión vacía: no hay formatos vinculados ni rutas para congelar",
+        ));
     }
 
     sqlx::query_as::<_, RevisionRow>(
@@ -1759,7 +2115,9 @@ pub async fn list_favorite_documents(
                     SELECT COUNT(*) FROM document_files f
                     WHERE f.document_version_id = d.current_version_id AND f.is_available = 1
                 ), 0) AS file_count,
-                0 AS has_unregistered_change
+                0 AS has_unregistered_change,
+                NULL AS current_revision_code,
+                NULL AS current_revision_status
              FROM favorites fav
              JOIN documents d ON d.id = fav.entity_id
              LEFT JOIN categories c ON c.id = d.category_id
@@ -1783,7 +2141,9 @@ pub async fn list_favorite_documents(
                     SELECT COUNT(*) FROM document_files f
                     WHERE f.document_version_id = d.current_version_id AND f.is_available = 1
                 ), 0) AS file_count,
-                0 AS has_unregistered_change
+                0 AS has_unregistered_change,
+                NULL AS current_revision_code,
+                NULL AS current_revision_status
              FROM favorites fav
              JOIN documents d ON d.id = fav.entity_id
              LEFT JOIN categories c ON c.id = d.category_id
@@ -1794,7 +2154,7 @@ pub async fn list_favorite_documents(
         .fetch_all(&state.pool)
         .await?
     };
-    enrich_change_flags(&state, docs).await
+    enrich_documents(&state, docs).await
 }
 
 #[tauri::command]

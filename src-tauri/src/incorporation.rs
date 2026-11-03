@@ -155,21 +155,9 @@ fn fingerprint(path: &Path) -> AppResult<String> {
 }
 
 fn stem_key(file_name: &str) -> String {
-    let path = Path::new(file_name);
-    let stem = path
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| file_name.to_string());
-    // Normalize common revision suffixes for grouping DOCX↔PDF
-    let lower = stem.to_ascii_lowercase();
-    let trimmed = lower
-        .trim_end_matches("_rev")
-        .trim_end_matches("-rev")
-        .trim_end_matches("_r")
-        .trim_end_matches("-r");
-    // Keep original casing of stem but use lowercase for key
-    let _ = trimmed;
-    stem.to_ascii_lowercase()
+    // Strip `_RA` / `_RB` / `_R0` / `_RevA` so DOCX+PDF across revisions
+    // share one document identity (group by id; revisions hang off the doc).
+    crate::doc_revisions::revision_identity_key(file_name)
 }
 
 fn role_for_extension(ext: Option<&str>) -> &'static str {
@@ -224,7 +212,7 @@ pub fn group_incorporation_paths(paths: &[PathBuf]) -> Vec<(String, Vec<PathBuf>
 }
 
 fn title_from_group(files: &[PathBuf]) -> String {
-    // Prefer editable / principal name
+    // Prefer editable / principal name; strip revision suffix for logical title
     let mut ranked = files.to_vec();
     ranked.sort_by_key(|p| {
         let ext = p
@@ -240,11 +228,56 @@ fn title_from_group(files: &[PathBuf]) -> String {
             _ => 9,
         }
     });
-    ranked
+    let stem = ranked
         .first()
         .and_then(|p| p.file_stem())
         .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "Documento".into())
+        .unwrap_or_else(|| "Documento".into());
+    let (identity, _) = crate::doc_revisions::strip_revision_suffix(&stem);
+    if identity.trim().is_empty() {
+        stem
+    } else {
+        identity
+    }
+}
+
+/// Ensure a revision row exists for `document_id` + code; return its id.
+pub async fn ensure_revision_row(
+    pool: &SqlitePool,
+    document_id: &str,
+    version_id: &str,
+    revision_code: &str,
+) -> AppResult<String> {
+    let code = revision_code.trim();
+    if code.is_empty() {
+        return Err(AppError::msg("Código de revisión vacío"));
+    }
+    let existing: Option<(String,)> = sqlx::query_as(
+        "SELECT id FROM revisions WHERE document_id = ? AND revision_code = ? LIMIT 1",
+    )
+    .bind(document_id)
+    .bind(code)
+    .fetch_optional(pool)
+    .await?;
+    if let Some((id,)) = existing {
+        return Ok(id);
+    }
+    let id = Uuid::new_v4().to_string();
+    let status = crate::doc_revisions::status_for_code(code);
+    sqlx::query(
+        "INSERT INTO revisions (
+            id, document_id, revision_code, issued_at, notes, created_at,
+            document_version_id, status
+         ) VALUES (?, ?, ?, NULL, NULL, datetime('now'), ?, ?)",
+    )
+    .bind(&id)
+    .bind(document_id)
+    .bind(code)
+    .bind(version_id)
+    .bind(status)
+    .execute(pool)
+    .await?;
+    Ok(id)
 }
 
 async fn find_linked_document(
@@ -433,24 +466,51 @@ pub async fn preview_incorporation(
             !ids.is_empty() && ids.iter().all(|id| Some(id) == ids.first())
         };
 
+        let rev_codes: Vec<String> = {
+            let mut codes: Vec<String> = file_props
+                .iter()
+                .filter_map(|f| {
+                    crate::doc_revisions::parse_revision_filename(&f.file_name)
+                        .map(|p| p.revision_code)
+                })
+                .collect();
+            codes.sort_by(|a, b| crate::doc_revisions::cmp_revision_codes(a, b));
+            codes.dedup();
+            codes
+        };
+        let rev_note = if !rev_codes.is_empty()
+            && crate::doc_revisions::category_uses_revisions(&input.category_key)
+        {
+            Some(format!(
+                "Revisiones detectadas: {} (borrador=letra, emitida=número). Un documento lógico.",
+                rev_codes.join(", ")
+            ))
+        } else {
+            None
+        };
+
         let (suggested_mode, suggested_doc, notes) = if all_linked_same {
             (
                 IncorporationMode::AssociateExisting,
                 file_props[0].already_linked_document_id.clone(),
-                Some("Ya vinculados al mismo documento (idempotente)".into()),
+                rev_note.or_else(|| {
+                    Some("Ya vinculados al mismo documento (idempotente)".into())
+                }),
             )
         } else if let Some(m) = matches.first() {
             if m.file_count == 0 || m.score >= 80 {
                 (
                     IncorporationMode::AssociateExisting,
                     Some(m.document_id.clone()),
-                    Some("Se propone asociar a un documento existente".into()),
+                    rev_note.or_else(|| {
+                        Some("Se propone asociar a un documento existente".into())
+                    }),
                 )
             } else {
-                (IncorporationMode::RegisterNew, None, None)
+                (IncorporationMode::RegisterNew, None, rev_note)
             }
         } else {
-            (IncorporationMode::RegisterNew, None, None)
+            (IncorporationMode::RegisterNew, None, rev_note)
         };
 
         groups.push(IncorporationGroupProposal {
@@ -526,6 +586,13 @@ pub async fn link_working_file(
     .fetch_optional(pool)
     .await?;
     if let Some((id,)) = existing {
+        if let Some(rid) = revision_id {
+            sqlx::query("UPDATE document_files SET revision_id = ? WHERE id = ?")
+                .bind(rid)
+                .bind(&id)
+                .execute(pool)
+                .await?;
+        }
         return Ok((id, true));
     }
 
@@ -943,7 +1010,42 @@ pub async fn apply_incorporation(
 
                 let mut linked = 0usize;
                 let mut skipped = 0usize;
+                // Group working files by revision code (id+rev); link without re-copy.
+                // Letter codes → draft; numeric → issued. No empty revision rows.
                 for (path, role) in &working_paths {
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let rev_id = if crate::doc_revisions::category_uses_revisions(
+                        &input.category_key,
+                    ) {
+                        if let Some(parsed) =
+                            crate::doc_revisions::parse_revision_filename(&name)
+                        {
+                            match ensure_revision_row(
+                                pool,
+                                &doc_id,
+                                &version_id,
+                                &parsed.revision_code,
+                            )
+                            .await
+                            {
+                                Ok(id) => Some(id),
+                                Err(e) => {
+                                    warnings.push(format!(
+                                        "revisión {}: {e}",
+                                        parsed.revision_code
+                                    ));
+                                    None
+                                }
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
                     match link_working_file(
                         pool,
                         &loc,
@@ -951,7 +1053,7 @@ pub async fn apply_incorporation(
                         path,
                         None,
                         Some(role),
-                        None,
+                        rev_id.as_deref(),
                     )
                     .await
                     {
@@ -1034,6 +1136,22 @@ mod grouping_tests {
             .find(|(k, _)| k == "memoria_calculo")
             .expect("memo group");
         assert_eq!(memo.1.len(), 2);
+    }
+
+    #[test]
+    fn groups_rb_r0_docx_pdf_as_one_document() {
+        let paths = vec![
+            PathBuf::from("/p/1126-MC-002_RB.docx"),
+            PathBuf::from("/p/1126-MC-002_RB.pdf"),
+            PathBuf::from("/p/1126-MC-002_R0.docx"),
+            PathBuf::from("/p/1126-MC-002_R0.pdf"),
+        ];
+        let g = group_incorporation_paths(&paths);
+        assert_eq!(g.len(), 1, "four files → one logical identity");
+        assert_eq!(g[0].1.len(), 4);
+        assert_eq!(g[0].0, "1126-mc-002");
+        let title = title_from_group(&g[0].1);
+        assert_eq!(title, "1126-MC-002");
     }
 
     #[test]

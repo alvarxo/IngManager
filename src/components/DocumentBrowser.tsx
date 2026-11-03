@@ -314,6 +314,9 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
                 <th className="h-[36px] px-3 font-medium">Código</th>
                 <th className="px-3 font-medium">Título</th>
                 <th className="w-[100px] px-3 font-medium">Estado</th>
+                {(categoryKey === "memorias" || categoryKey === "planos") && (
+                  <th className="w-[100px] px-3 font-medium">Revisión actual</th>
+                )}
                 <th className="w-[70px] px-3 font-medium">Versión</th>
                 <th className="w-[70px] px-3 font-medium">Archivos</th>
                 <th className="w-[110px] px-3 font-medium">Notas</th>
@@ -367,6 +370,22 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
                     )}
                   </td>
                   <td className="px-3 text-[12px] text-muted">{d.status}</td>
+                  {(categoryKey === "memorias" || categoryKey === "planos") && (
+                    <td className="px-3 font-mono text-[12px]">
+                      {d.current_revision_code ? (
+                        <span className="inline-flex items-center gap-1">
+                          {d.current_revision_code}
+                          <span className="text-[10px] uppercase text-muted">
+                            {d.current_revision_status === "issued"
+                              ? "emitida"
+                              : "borrador"}
+                          </span>
+                        </span>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                  )}
                   <td className="px-3 font-mono text-[12px]">
                     {showCurrentVersionOnly
                       ? (d.current_version_label ?? "—")

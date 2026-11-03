@@ -12,6 +12,8 @@ mod engineering_files;
 mod engineering_sap_tests;
 #[cfg(test)]
 mod models_versions_hotfix_tests;
+#[cfg(test)]
+mod usability_versions_hotfix_tests;
 mod error;
 #[cfg(test)]
 mod flexibility_tests;
@@ -85,14 +87,20 @@ pub fn run() {
             commands::documents::list_document_versions,
             commands::documents::list_version_files,
             commands::documents::create_document_version,
+            commands::documents::preview_next_physical_version,
+            commands::documents::create_next_physical_version,
+            commands::documents::repair_version_file,
             commands::documents::restore_document_version,
             commands::documents::delete_logical_document,
             commands::documents::cleanup_document_availability,
             commands::documents::open_document_file,
+            commands::documents::open_document_principal,
             commands::documents::list_revisions,
             commands::documents::create_revision,
             commands::documents::list_subcategories,
             commands::documents::create_subcategory,
+            commands::documents::update_subcategory,
+            commands::documents::delete_subcategory,
             commands::documents::list_document_relationships,
             commands::documents::create_document_relationship,
             commands::documents::delete_document_relationship,

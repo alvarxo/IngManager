@@ -118,9 +118,35 @@ pub struct UpdateDocumentInput {
 pub struct CreateVersionInput {
     pub document_id: String,
     pub notes: Option<String>,
+    /// Link an existing working file as the new version (no FS copy).
     pub source_absolute_path: Option<String>,
-    /// If true, copy current version files into the new version snapshot.
+    /// Legacy: re-link current version paths (no physical next-name copy).
     pub from_current: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateNextPhysicalVersionInput {
+    pub document_id: String,
+    pub notes: Option<String>,
+    /// Optional override source absolute path (must exist). Default: current principal.
+    pub source_absolute_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NextPhysicalVersionPreview {
+    pub source_absolute_path: String,
+    pub destination_absolute_path: String,
+    pub destination_file_name: String,
+    pub next_version_number: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepairVersionFileInput {
+    pub document_version_id: String,
+    pub absolute_path: String,
+    /// When set, mark this document_files row unavailable before linking the new path.
+    pub replace_file_id: Option<String>,
+    pub format_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -871,6 +897,372 @@ async fn rollback_empty_version(
     Ok(())
 }
 
+/// Resolve the current principal working file for physical next-version copy.
+async fn resolve_current_principal_source(
+    state: &AppState,
+    document_id: &str,
+    override_absolute: Option<&str>,
+) -> AppResult<(PathBuf, i64)> {
+    let loc = loc_for_document(state, document_id).await?;
+    let doc = fetch_document(state, document_id).await?;
+    let max_n: (i64,) = sqlx::query_as(
+        "SELECT COALESCE(MAX(version_number), 0) FROM document_versions WHERE document_id = ?",
+    )
+    .bind(document_id)
+    .fetch_one(&state.pool)
+    .await?;
+    let next_n = max_n.0 + 1;
+
+    if let Some(src) = override_absolute {
+        let path = PathBuf::from(src);
+        if !path.is_file() {
+            return Err(AppError::msg(
+                "Archivo fuente no disponible; no se creó versión ni copia",
+            ));
+        }
+        return Ok((path, next_n));
+    }
+
+    let cur = doc
+        .current_version_id
+        .ok_or_else(|| AppError::msg("El documento no tiene versión actual"))?;
+    let files = list_version_files_inner(state, &cur).await?;
+    let candidates: Vec<_> = files
+        .into_iter()
+        .filter(|f| f.is_available != 0)
+        .filter(|f| !f.relative_path.contains(".ingmanager/snapshots"))
+        .collect();
+    if candidates.is_empty() {
+        return Err(AppError::msg(
+            "No hay archivo principal disponible para copiar; no se creó versión",
+        ));
+    }
+    let pick = crate::engineering_files::pick_principal_open_index(
+        candidates
+            .iter()
+            .map(|f| (f.file_name.as_str(), f.extension.as_deref())),
+    )
+    .unwrap_or(0);
+    let chosen = &candidates[pick];
+    let abs = join_under_root(&loc.root_path, &chosen.relative_path)?;
+    if !abs.is_file() {
+        return Err(AppError::msg(
+            "Archivo fuente no disponible en disco; no se creó versión ni copia",
+        ));
+    }
+    Ok((abs, next_n))
+}
+
+#[tauri::command]
+pub async fn preview_next_physical_version(
+    state: State<'_, AppState>,
+    document_id: String,
+    source_absolute_path: Option<String>,
+) -> AppResult<NextPhysicalVersionPreview> {
+    preview_next_physical_version_inner(&state, &document_id, source_absolute_path.as_deref()).await
+}
+
+pub async fn preview_next_physical_version_inner(
+    state: &AppState,
+    document_id: &str,
+    source_absolute_path: Option<&str>,
+) -> AppResult<NextPhysicalVersionPreview> {
+    let (source, next_n) =
+        resolve_current_principal_source(state, document_id, source_absolute_path).await?;
+    let dest = crate::engineering_files::allocate_next_working_path(&source, next_n)
+        .map_err(AppError::msg)?;
+    let dest_name = dest
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("archivo")
+        .to_string();
+    Ok(NextPhysicalVersionPreview {
+        source_absolute_path: source.display().to_string(),
+        destination_absolute_path: dest.display().to_string(),
+        destination_file_name: dest_name,
+        next_version_number: next_n,
+    })
+}
+
+#[tauri::command]
+pub async fn create_next_physical_version(
+    state: State<'_, AppState>,
+    input: CreateNextPhysicalVersionInput,
+) -> AppResult<DocumentVersionRow> {
+    create_next_physical_version_inner(&state, input).await
+}
+
+/// «Crear siguiente versión»: FS copy to next `_vNN` name first, then SQLite register.
+pub async fn create_next_physical_version_inner(
+    state: &AppState,
+    input: CreateNextPhysicalVersionInput,
+) -> AppResult<DocumentVersionRow> {
+    let loc = loc_for_document(state, &input.document_id).await?;
+    let doc = fetch_document(state, &input.document_id).await?;
+    let prev_current = doc.current_version_id.clone();
+
+    let (source, next_n) = resolve_current_principal_source(
+        state,
+        &input.document_id,
+        input.source_absolute_path.as_deref(),
+    )
+    .await?;
+
+    // Authorize destination under project root.
+    let dest = crate::engineering_files::allocate_next_working_path(&source, next_n)
+        .map_err(AppError::msg)?;
+    let dest_rel = dest
+        .strip_prefix(&loc.root_path)
+        .map_err(|_| AppError::msg("Destino fuera del root autorizado del proyecto"))?;
+    let _ = dest_rel; // path_security via join later; ensure under root
+    if !dest.starts_with(&loc.root_path) {
+        return Err(AppError::msg(
+            "Destino fuera del root autorizado del proyecto",
+        ));
+    }
+
+    // Atomic preference: filesystem first.
+    fs::copy(&source, &dest).map_err(|e| {
+        AppError::msg(format!(
+            "No se pudo copiar a {}: {e}",
+            dest.display()
+        ))
+    })?;
+
+    let version_id = Uuid::new_v4().to_string();
+    let insert_result = async {
+        sqlx::query(
+            "INSERT INTO document_versions (
+                id, document_id, version_number, label, notes, created_at, is_snapshot
+             ) VALUES (?, ?, ?, ?, ?, datetime('now'), 0)",
+        )
+        .bind(&version_id)
+        .bind(&input.document_id)
+        .bind(next_n)
+        .bind(version_label(next_n))
+        .bind(&input.notes)
+        .execute(&state.pool)
+        .await?;
+
+        sqlx::query(
+            "UPDATE documents SET current_version_id = ?, updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(&version_id)
+        .bind(&input.document_id)
+        .execute(&state.pool)
+        .await?;
+
+        attach_file_inner(
+            state,
+            &version_id,
+            &dest.display().to_string(),
+            None,
+            None,
+            false,
+            Some("principal".into()),
+        )
+        .await?;
+        Ok::<(), AppError>(())
+    }
+    .await;
+
+    if let Err(e) = insert_result {
+        let _ = fs::remove_file(&dest);
+        if let Some(prev) = &prev_current {
+            let _ = rollback_empty_version(state, &input.document_id, &version_id, prev).await;
+        } else {
+            let _ = sqlx::query("DELETE FROM document_files WHERE document_version_id = ?")
+                .bind(&version_id)
+                .execute(&state.pool)
+                .await;
+            let _ = sqlx::query("DELETE FROM document_versions WHERE id = ?")
+                .bind(&version_id)
+                .execute(&state.pool)
+                .await;
+        }
+        return Err(AppError::msg(format!(
+            "Copia creada pero no se registró la versión ({e}); se eliminó la copia"
+        )));
+    }
+
+    let versions = list_document_versions_inner(state, &input.document_id).await?;
+    versions
+        .into_iter()
+        .find(|v| v.id == version_id)
+        .ok_or_else(|| AppError::msg("Versión creada no encontrada"))
+}
+
+#[tauri::command]
+pub async fn repair_version_file(
+    state: State<'_, AppState>,
+    input: RepairVersionFileInput,
+) -> AppResult<DocumentFileRow> {
+    repair_version_file_inner(&state, input).await
+}
+
+/// «Reparar archivo de esta versión»: link/replace path on existing version (no bump).
+pub async fn repair_version_file_inner(
+    state: &AppState,
+    input: RepairVersionFileInput,
+) -> AppResult<DocumentFileRow> {
+    let path = PathBuf::from(&input.absolute_path);
+    if !path.is_file() {
+        return Err(AppError::msg(
+            "Archivo de reparación no disponible; no se modificó la versión",
+        ));
+    }
+
+    let version_exists: Option<(String,)> =
+        sqlx::query_as("SELECT id FROM document_versions WHERE id = ?")
+            .bind(&input.document_version_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    if version_exists.is_none() {
+        return Err(AppError::msg("Versión no encontrada"));
+    }
+
+    if let Some(old_id) = &input.replace_file_id {
+        sqlx::query("UPDATE document_files SET is_available = 0 WHERE id = ? AND document_version_id = ?")
+            .bind(old_id)
+            .bind(&input.document_version_id)
+            .execute(&state.pool)
+            .await?;
+    } else {
+        // Mark missing/unavailable principal rows on this version so repair replaces them.
+        let files = list_version_files_inner(state, &input.document_version_id).await?;
+        let loc = loc_for_version(state, &input.document_version_id).await?;
+        for f in files {
+            if f.is_available == 0 {
+                continue;
+            }
+            let abs = join_under_root(&loc.root_path, &f.relative_path)?;
+            if !abs.is_file() {
+                sqlx::query("UPDATE document_files SET is_available = 0 WHERE id = ?")
+                    .bind(&f.id)
+                    .execute(&state.pool)
+                    .await?;
+            }
+        }
+    }
+
+    attach_file_inner(
+        state,
+        &input.document_version_id,
+        &input.absolute_path,
+        input.format_label,
+        None,
+        false,
+        Some("principal".into()),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn open_document_principal(
+    state: State<'_, AppState>,
+    document_id: String,
+    use_temp_copy: Option<bool>,
+) -> AppResult<String> {
+    open_document_principal_inner(&state, &document_id, use_temp_copy).await
+}
+
+pub async fn open_document_principal_inner(
+    state: &AppState,
+    document_id: &str,
+    use_temp_copy: Option<bool>,
+) -> AppResult<String> {
+    let doc = fetch_document(state, document_id).await?;
+    let version_id = doc
+        .current_version_id
+        .ok_or_else(|| AppError::msg("El documento no tiene versión actual"))?;
+    let files = list_version_files_inner(state, &version_id).await?;
+    let available: Vec<_> = files
+        .into_iter()
+        .filter(|f| f.is_available != 0)
+        .collect();
+    if available.is_empty() {
+        return Err(AppError::msg("No hay archivos disponibles para abrir"));
+    }
+    let pick = crate::engineering_files::pick_principal_open_index(
+        available
+            .iter()
+            .map(|f| (f.file_name.as_str(), f.extension.as_deref())),
+    )
+    .unwrap_or(0);
+    let file_id = available[pick].id.clone();
+    open_document_file_by_id(state, &file_id, use_temp_copy).await
+}
+
+async fn open_document_file_by_id(
+    state: &AppState,
+    file_id: &str,
+    use_temp_copy: Option<bool>,
+) -> AppResult<String> {
+    let row: (String, String, i64, String) = sqlx::query_as(
+        "SELECT f.relative_path, f.file_name, COALESCE(v.is_snapshot, 0), d.project_id
+         FROM document_files f
+         JOIN document_versions v ON v.id = f.document_version_id
+         JOIN documents d ON d.id = v.document_id
+         WHERE f.id = ?",
+    )
+    .bind(file_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| AppError::msg("Archivo de documento no encontrado"))?;
+
+    let (rel, file_name, is_snapshot, project_id) = row;
+    let loc = crate::project_paths::resolve_project_location(&state.pool, &project_id).await?;
+    let src = join_under_root(&loc.root_path, &rel)?;
+    if !src.is_file() {
+        sqlx::query("UPDATE document_files SET is_available = 0 WHERE id = ?")
+            .bind(file_id)
+            .execute(&state.pool)
+            .await
+            .ok();
+        return Err(AppError::msg("Archivo no disponible"));
+    }
+
+    let force_temp = use_temp_copy.unwrap_or(is_snapshot == 1);
+    let open_path = if force_temp {
+        let tmp = temp_open_dir(&loc.root_path).join(Uuid::new_v4().to_string());
+        fs::create_dir_all(&tmp)?;
+        let dest = tmp.join(&file_name);
+        fs::copy(&src, &dest)?;
+        dest
+    } else {
+        src
+    };
+
+    open::that(&open_path).map_err(|e| AppError::msg(format!("No se pudo abrir: {e}")))?;
+    Ok(open_path.display().to_string())
+}
+
+/// Resolve principal file id without opening (for tests / UI previews).
+pub async fn resolve_document_principal_file_id(
+    state: &AppState,
+    document_id: &str,
+) -> AppResult<String> {
+    let doc = fetch_document(state, document_id).await?;
+    let version_id = doc
+        .current_version_id
+        .ok_or_else(|| AppError::msg("El documento no tiene versión actual"))?;
+    let files = list_version_files_inner(state, &version_id).await?;
+    let available: Vec<_> = files
+        .into_iter()
+        .filter(|f| f.is_available != 0)
+        .collect();
+    if available.is_empty() {
+        return Err(AppError::msg("No hay archivos disponibles"));
+    }
+    let pick = crate::engineering_files::pick_principal_open_index(
+        available
+            .iter()
+            .map(|f| (f.file_name.as_str(), f.extension.as_deref())),
+    )
+    .unwrap_or(0);
+    Ok(available[pick].id.clone())
+}
+
 async fn insert_unavailable_file_row(
     state: &AppState,
     version_id: &str,
@@ -991,43 +1383,7 @@ pub async fn open_document_file(
     file_id: String,
     use_temp_copy: Option<bool>,
 ) -> AppResult<String> {
-    let row: (String, String, i64, String) = sqlx::query_as(
-        "SELECT f.relative_path, f.file_name, COALESCE(v.is_snapshot, 0), d.project_id
-         FROM document_files f
-         JOIN document_versions v ON v.id = f.document_version_id
-         JOIN documents d ON d.id = v.document_id
-         WHERE f.id = ?",
-    )
-    .bind(&file_id)
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or_else(|| AppError::msg("Archivo de documento no encontrado"))?;
-
-    let (rel, file_name, is_snapshot, project_id) = row;
-    let loc = crate::project_paths::resolve_project_location(&state.pool, &project_id).await?;
-    let src = join_under_root(&loc.root_path, &rel)?;
-    if !src.is_file() {
-        sqlx::query("UPDATE document_files SET is_available = 0 WHERE id = ?")
-            .bind(&file_id)
-            .execute(&state.pool)
-            .await
-            .ok();
-        return Err(AppError::msg("Archivo no disponible"));
-    }
-
-    let force_temp = use_temp_copy.unwrap_or(is_snapshot == 1);
-    let open_path = if force_temp {
-        let tmp = temp_open_dir(&loc.root_path).join(Uuid::new_v4().to_string());
-        fs::create_dir_all(&tmp)?;
-        let dest = tmp.join(&file_name);
-        fs::copy(&src, &dest)?;
-        dest
-    } else {
-        src
-    };
-
-    open::that(&open_path).map_err(|e| AppError::msg(format!("No se pudo abrir: {e}")))?;
-    Ok(open_path.display().to_string())
+    open_document_file_by_id(&state, &file_id, use_temp_copy).await
 }
 
 #[tauri::command]
@@ -1161,6 +1517,82 @@ pub async fn create_subcategory(
     .fetch_one(&state.pool)
     .await
     .map_err(AppError::from)
+}
+
+#[tauri::command]
+pub async fn update_subcategory(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+) -> AppResult<SubcategoryRow> {
+    update_subcategory_inner(&state, &id, &name).await
+}
+
+pub async fn update_subcategory_inner(
+    state: &AppState,
+    id: &str,
+    name: &str,
+) -> AppResult<SubcategoryRow> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err(AppError::msg("Nombre de subcategoría vacío"));
+    }
+    let existing = sqlx::query_as::<_, SubcategoryRow>(
+        "SELECT id, project_id, category_key, name, sort_order, created_at
+         FROM document_subcategories WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| AppError::msg("Subcategoría no encontrada"))?;
+
+    let old_name = existing.name.clone();
+    sqlx::query("UPDATE document_subcategories SET name = ? WHERE id = ?")
+        .bind(&name)
+        .bind(id)
+        .execute(&state.pool)
+        .await?;
+
+    // Keep document subcategory strings in sync when they matched the old name.
+    // Metadata only — never touches file paths.
+    sqlx::query(
+        "UPDATE documents SET subcategory = ?, updated_at = datetime('now')
+         WHERE project_id = ? AND subcategory = ?",
+    )
+    .bind(&name)
+    .bind(&existing.project_id)
+    .bind(&old_name)
+    .execute(&state.pool)
+    .await?;
+
+    sqlx::query_as::<_, SubcategoryRow>(
+        "SELECT id, project_id, category_key, name, sort_order, created_at
+         FROM document_subcategories WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(AppError::from)
+}
+
+#[tauri::command]
+pub async fn delete_subcategory(
+    state: State<'_, AppState>,
+    id: String,
+) -> AppResult<()> {
+    delete_subcategory_inner(&state, &id).await
+}
+
+pub async fn delete_subcategory_inner(state: &AppState, id: &str) -> AppResult<()> {
+    let res = sqlx::query("DELETE FROM document_subcategories WHERE id = ?")
+        .bind(id)
+        .execute(&state.pool)
+        .await?;
+    if res.rows_affected() == 0 {
+        return Err(AppError::msg("Subcategoría no encontrada"));
+    }
+    // Document.subcategory strings may remain as orphan labels (no path renames).
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]

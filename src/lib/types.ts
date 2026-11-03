@@ -375,8 +375,29 @@ export interface ImportProjectResult {
 export interface CreateVersionInput {
   document_id: string;
   notes?: string | null;
+  /** Link existing file as new version (no copy). */
   source_absolute_path?: string | null;
   from_current?: boolean | null;
+}
+
+export interface CreateNextPhysicalVersionInput {
+  document_id: string;
+  notes?: string | null;
+  source_absolute_path?: string | null;
+}
+
+export interface NextPhysicalVersionPreview {
+  source_absolute_path: string;
+  destination_absolute_path: string;
+  destination_file_name: string;
+  next_version_number: number;
+}
+
+export interface RepairVersionFileInput {
+  document_version_id: string;
+  absolute_path: string;
+  replace_file_id?: string | null;
+  format_label?: string | null;
 }
 
 export interface CreateRevisionInput {

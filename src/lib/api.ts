@@ -10,8 +10,11 @@ import type {
   CreateProjectInput,
   CreateRevisionInput,
   CreateSentTransmissionInput,
+  CreateNextPhysicalVersionInput,
   CreateVersionInput,
   DocumentFileRow,
+  NextPhysicalVersionPreview,
+  RepairVersionFileInput,
   DocumentRow,
   DocumentVersionRow,
   EntryProperties,
@@ -239,6 +242,18 @@ export const api = {
     invoke<DocumentFileRow[]>("list_version_files", { versionId }),
   createDocumentVersion: (input: CreateVersionInput) =>
     invoke<DocumentVersionRow>("create_document_version", { input }),
+  previewNextPhysicalVersion: (
+    documentId: string,
+    sourceAbsolutePath?: string | null,
+  ) =>
+    invoke<NextPhysicalVersionPreview>("preview_next_physical_version", {
+      documentId,
+      sourceAbsolutePath: sourceAbsolutePath ?? null,
+    }),
+  createNextPhysicalVersion: (input: CreateNextPhysicalVersionInput) =>
+    invoke<DocumentVersionRow>("create_next_physical_version", { input }),
+  repairVersionFile: (input: RepairVersionFileInput) =>
+    invoke<DocumentFileRow>("repair_version_file", { input }),
   restoreDocumentVersion: (
     documentId: string,
     versionId: string,
@@ -264,6 +279,14 @@ export const api = {
       fileId,
       useTempCopy: useTempCopy ?? null,
     }),
+  openDocumentPrincipal: (
+    documentId: string,
+    useTempCopy?: boolean | null,
+  ) =>
+    invoke<string>("open_document_principal", {
+      documentId,
+      useTempCopy: useTempCopy ?? null,
+    }),
   listRevisions: (documentId: string) =>
     invoke<RevisionRow[]>("list_revisions", { documentId }),
   createRevision: (input: CreateRevisionInput) =>
@@ -280,6 +303,10 @@ export const api = {
       categoryKey,
       name,
     }),
+  updateSubcategory: (id: string, name: string) =>
+    invoke<SubcategoryRow>("update_subcategory", { id, name }),
+  deleteSubcategory: (id: string) =>
+    invoke<void>("delete_subcategory", { id }),
   listDocumentRelationships: (documentId: string) =>
     invoke<RelationshipRow[]>("list_document_relationships", { documentId }),
   createDocumentRelationship: (input: CreateRelationshipInput) =>

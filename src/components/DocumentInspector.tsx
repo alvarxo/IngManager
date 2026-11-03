@@ -67,6 +67,13 @@ export function DocumentInspector() {
   const [relError, setRelError] = useState<string | null>(null);
   const [versionError, setVersionError] = useState<string | null>(null);
   const [versionBusy, setVersionBusy] = useState(false);
+  const [editingMeta, setEditingMeta] = useState(false);
+  const [editTitle, setEditTitle] = useState("");
+  const [editSubcategory, setEditSubcategory] = useState("");
+  const [editOrigin, setEditOrigin] = useState("");
+  const [editReceivedAt, setEditReceivedAt] = useState("");
+  const [editNotes, setEditNotes] = useState("");
+  const [metaError, setMetaError] = useState<string | null>(null);
 
   const activeVersionId =
     selectedVersionId ??
@@ -88,6 +95,32 @@ export function DocumentInspector() {
       await qc.invalidateQueries({ queryKey: ["documents"] });
     },
   });
+
+  const metaMut = useMutation({
+    mutationFn: () =>
+      api.updateDocument({
+        id: documentId!,
+        title: editTitle.trim() || undefined,
+        subcategory: editSubcategory.trim() || null,
+        origin: editOrigin.trim() || null,
+        received_at: editReceivedAt.trim() || null,
+        notes: editNotes.trim() || null,
+      }),
+    onSuccess: async () => {
+      setEditingMeta(false);
+      setMetaError(null);
+      await qc.invalidateQueries({ queryKey: ["document", documentId] });
+      await qc.invalidateQueries({ queryKey: ["documents"] });
+    },
+    onError: (e: Error) => setMetaError(String(e)),
+  });
+
+  async function invalidateVersionQueries() {
+    await qc.invalidateQueries({ queryKey: ["document", documentId] });
+    await qc.invalidateQueries({ queryKey: ["documents"] });
+    await qc.invalidateQueries({ queryKey: ["doc-versions", documentId] });
+    await qc.invalidateQueries({ queryKey: ["doc-version-files"] });
+  }
 
   const favMut = useMutation({
     mutationFn: (value: boolean) =>
@@ -180,20 +213,106 @@ export function DocumentInspector() {
                 />
               </Button>
             </div>
-            <div className="text-[14px] font-medium">{d.title}</div>
-            {d.has_unregistered_change === 1 && (
-              <div className="border border-warn/40 bg-warn/10 px-2 py-1.5 text-[12px] text-warn">
-                Cambio detectado en archivos físicos vs versión registrada. Registre
-                una nueva versión si corresponde.
+            {!editingMeta ? (
+              <>
+                <div className="text-[14px] font-medium">{d.title}</div>
+                {d.has_unregistered_change === 1 && (
+                  <div className="border border-warn/40 bg-warn/10 px-2 py-1.5 text-[12px] text-warn">
+                    Cambio detectado en archivos físicos vs versión registrada. Registre
+                    una nueva versión si corresponde.
+                  </div>
+                )}
+                <Meta label="Tipo" value={d.doc_type ?? "—"} />
+                <Meta label="Estado" value={d.status} />
+                <Meta label="Versión actual" value={d.current_version_label ?? "—"} />
+                <Meta label="Subcategoría" value={d.subcategory ?? "—"} />
+                <Meta label="Origen" value={d.origin ?? "—"} />
+                <Meta label="Recepción" value={d.received_at ?? "—"} />
+                <Meta label="Notas" value={d.notes ?? "—"} />
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    setEditTitle(d.title);
+                    setEditSubcategory(d.subcategory ?? "");
+                    setEditOrigin(d.origin ?? "");
+                    setEditReceivedAt(d.received_at ?? "");
+                    setEditNotes(d.notes ?? "");
+                    setMetaError(null);
+                    setEditingMeta(true);
+                  }}
+                >
+                  Editar metadatos…
+                </Button>
+              </>
+            ) : (
+              <div className="space-y-2">
+                <p className="text-[11px] text-muted">
+                  Solo metadatos SQLite — no renombra carpetas ni archivos físicos.
+                </p>
+                <label className="block">
+                  <div className="mb-1 text-[11px] uppercase text-muted">Título</div>
+                  <input
+                    className="h-[32px] w-full border border-border bg-elevated px-2 text-[13px]"
+                    value={editTitle}
+                    onChange={(e) => setEditTitle(e.target.value)}
+                  />
+                </label>
+                <label className="block">
+                  <div className="mb-1 text-[11px] uppercase text-muted">Subcategoría</div>
+                  <input
+                    className="h-[32px] w-full border border-border bg-elevated px-2 text-[13px]"
+                    value={editSubcategory}
+                    onChange={(e) => setEditSubcategory(e.target.value)}
+                  />
+                </label>
+                <label className="block">
+                  <div className="mb-1 text-[11px] uppercase text-muted">Origen</div>
+                  <input
+                    className="h-[32px] w-full border border-border bg-elevated px-2 text-[13px]"
+                    value={editOrigin}
+                    onChange={(e) => setEditOrigin(e.target.value)}
+                  />
+                </label>
+                <label className="block">
+                  <div className="mb-1 text-[11px] uppercase text-muted">Recepción</div>
+                  <input
+                    className="h-[32px] w-full border border-border bg-elevated px-2 text-[13px]"
+                    value={editReceivedAt}
+                    onChange={(e) => setEditReceivedAt(e.target.value)}
+                  />
+                </label>
+                <label className="block">
+                  <div className="mb-1 text-[11px] uppercase text-muted">Notas</div>
+                  <textarea
+                    className="min-h-[64px] w-full border border-border bg-elevated px-2 py-1 text-[13px]"
+                    value={editNotes}
+                    onChange={(e) => setEditNotes(e.target.value)}
+                  />
+                </label>
+                {metaError && (
+                  <div className="border border-error/40 bg-error/10 px-2 py-1.5 text-[12px] text-error">
+                    {metaError}
+                  </div>
+                )}
+                <div className="flex flex-wrap gap-1">
+                  <Button
+                    size="sm"
+                    disabled={metaMut.isPending}
+                    onClick={() => metaMut.mutate()}
+                  >
+                    Guardar
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => setEditingMeta(false)}
+                  >
+                    Cancelar
+                  </Button>
+                </div>
               </div>
             )}
-            <Meta label="Tipo" value={d.doc_type ?? "—"} />
-            <Meta label="Estado" value={d.status} />
-            <Meta label="Versión actual" value={d.current_version_label ?? "—"} />
-            <Meta label="Subcategoría" value={d.subcategory ?? "—"} />
-            <Meta label="Origen" value={d.origin ?? "—"} />
-            <Meta label="Recepción" value={d.received_at ?? "—"} />
-            <Meta label="Notas" value={d.notes ?? "—"} />
             {d.category_key === "memorias" && (
               <label className="block">
                 <div className="mb-1 text-[11px] uppercase text-muted">Cambiar estado</div>
@@ -227,9 +346,7 @@ export function DocumentInspector() {
                       absolute_path: picked,
                       as_snapshot: false,
                     });
-                    await qc.invalidateQueries({ queryKey: ["document", documentId] });
-                    await qc.invalidateQueries({ queryKey: ["documents"] });
-                    await qc.invalidateQueries({ queryKey: ["doc-version-files"] });
+                    await invalidateVersionQueries();
                   } catch (e) {
                     setVersionError(String(e));
                   }
@@ -240,33 +357,21 @@ export function DocumentInspector() {
               <Button
                 size="sm"
                 disabled={versionBusy}
+                title="Copia el archivo principal a Base_vNN y registra esa copia"
                 onClick={async () => {
                   try {
                     setVersionBusy(true);
                     setVersionError(null);
-                    const picked = await open({
-                      multiple: false,
-                      title:
-                        "Vincular archivo existente como nueva versión (sin copiar). Cancelar = clonar versión actual.",
+                    const preview = await api.previewNextPhysicalVersion(d.id);
+                    const ok = window.confirm(
+                      `¿Crear siguiente versión física?\n\nOrigen: ${preview.source_absolute_path}\nDestino: ${preview.destination_file_name}\n\nCancelar = no crear versión.`,
+                    );
+                    if (!ok) return;
+                    await api.createNextPhysicalVersion({
+                      document_id: d.id,
+                      notes: "Siguiente versión física",
                     });
-                    if (typeof picked === "string") {
-                      await api.createDocumentVersion({
-                        document_id: d.id,
-                        source_absolute_path: picked,
-                        from_current: false,
-                        notes: "Nueva versión vinculada a archivo existente",
-                      });
-                    } else {
-                      await api.createDocumentVersion({
-                        document_id: d.id,
-                        from_current: true,
-                        notes: "Nueva versión registrada",
-                      });
-                    }
-                    await qc.invalidateQueries({ queryKey: ["document", documentId] });
-                    await qc.invalidateQueries({ queryKey: ["documents"] });
-                    await qc.invalidateQueries({ queryKey: ["doc-versions", documentId] });
-                    await qc.invalidateQueries({ queryKey: ["doc-version-files"] });
+                    await invalidateVersionQueries();
                     setInspectorTab("doc-versions");
                   } catch (e) {
                     setVersionError(String(e));
@@ -275,7 +380,69 @@ export function DocumentInspector() {
                   }
                 }}
               >
-                Nueva versión
+                Crear siguiente versión
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={versionBusy}
+                title="Vincular un archivo ya existente como nueva versión (sin copiar)"
+                onClick={async () => {
+                  try {
+                    setVersionBusy(true);
+                    setVersionError(null);
+                    const picked = await open({
+                      multiple: false,
+                      title:
+                        "Registrar archivo existente como nueva versión (sin copiar). Cancelar = no crear.",
+                    });
+                    if (typeof picked !== "string") return;
+                    await api.createDocumentVersion({
+                      document_id: d.id,
+                      source_absolute_path: picked,
+                      from_current: false,
+                      notes: "Versión vinculada a archivo existente",
+                    });
+                    await invalidateVersionQueries();
+                    setInspectorTab("doc-versions");
+                  } catch (e) {
+                    setVersionError(String(e));
+                  } finally {
+                    setVersionBusy(false);
+                  }
+                }}
+              >
+                Registrar archivo existente
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={versionBusy || !d.current_version_id}
+                title="Reparar / reemplazar archivo de la versión actual sin subir el número"
+                onClick={async () => {
+                  try {
+                    setVersionBusy(true);
+                    setVersionError(null);
+                    if (!d.current_version_id) return;
+                    const picked = await open({
+                      multiple: false,
+                      title:
+                        "Reparar archivo de esta versión (sin nueva versión). Cancelar = no cambiar.",
+                    });
+                    if (typeof picked !== "string") return;
+                    await api.repairVersionFile({
+                      document_version_id: d.current_version_id,
+                      absolute_path: picked,
+                    });
+                    await invalidateVersionQueries();
+                  } catch (e) {
+                    setVersionError(String(e));
+                  } finally {
+                    setVersionBusy(false);
+                  }
+                }}
+              >
+                Reparar archivo de esta versión
               </Button>
             </div>
             {versionError && (

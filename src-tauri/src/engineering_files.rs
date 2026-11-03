@@ -5,7 +5,7 @@
 //! Distinct stems like `… SIN CAMIONES` vs `… CON CAMIONES` are never merged.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -493,6 +493,88 @@ pub fn filter_visible_names(
     out
 }
 
+/// Preferred open order for logical-document principal files (Lógicos dbl-click).
+/// DOCX → DWG → SDB → RVT, then other principals; auxiliaries last.
+pub fn principal_open_rank(extension: Option<&str>) -> u8 {
+    match extension.map(|e| e.trim_start_matches('.').to_ascii_lowercase()).as_deref() {
+        Some("docx") | Some("doc") => 0,
+        Some("dwg") | Some("dxf") => 1,
+        Some("sdb") => 2,
+        Some("rvt") | Some("rfa") => 3,
+        Some(ext) if OTHER_PRINCIPAL_EXTS.contains(&ext) => 4,
+        Some(ext) if SAP_PRINCIPAL_EXTS.contains(&ext) => 4,
+        Some(ext)
+            if SAP_AUX_EXTS.iter().any(|a| a.eq_ignore_ascii_case(ext))
+                || OTHER_AUX_EXTS.iter().any(|a| a.eq_ignore_ascii_case(ext)) =>
+        {
+            90
+        }
+        _ => 50,
+    }
+}
+
+/// Pick the best file index for opening among (file_name, extension) pairs.
+/// Lower `principal_open_rank` wins; ties keep the first occurrence.
+pub fn pick_principal_open_index<'a, I>(files: I) -> Option<usize>
+where
+    I: IntoIterator<Item = (&'a str, Option<&'a str>)>,
+{
+    let mut best: Option<(usize, u8)> = None;
+    for (idx, (_name, ext)) in files.into_iter().enumerate() {
+        let rank = principal_open_rank(ext);
+        match best {
+            None => best = Some((idx, rank)),
+            Some((_, best_rank)) if rank < best_rank => best = Some((idx, rank)),
+            _ => {}
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// Build the next working filename for a physical copy: `{base}_v{n:02}{ext}`.
+/// Uses `strip_version_suffix` so `1126 - MODELO_v01.sdb` → `1126 - MODELO_v02.sdb`.
+pub fn next_working_filename(current_file_name: &str, next_version_number: i64) -> String {
+    let path = Path::new(current_file_name);
+    let stem = raw_stem(current_file_name);
+    let (base, _) = strip_version_suffix(&stem);
+    let base = if base.is_empty() { stem } else { base };
+    let ext = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let n = if next_version_number < 1 {
+        1
+    } else {
+        next_version_number
+    };
+    format!("{base}_v{n:02}{ext}")
+}
+
+/// Resolve a free destination path beside `source`, starting at `next_version_number`.
+/// Bumps the `_vNN` suffix until the path does not exist (cap 999).
+pub fn allocate_next_working_path(
+    source: &Path,
+    next_version_number: i64,
+) -> Result<PathBuf, String> {
+    let parent = source
+        .parent()
+        .ok_or_else(|| "Archivo fuente sin directorio padre".to_string())?;
+    let file_name = source
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "Nombre de archivo inválido".to_string())?;
+    let mut n = next_version_number.max(1);
+    for _ in 0..1000 {
+        let candidate_name = next_working_filename(file_name, n);
+        let dest = parent.join(&candidate_name);
+        if !dest.exists() {
+            return Ok(dest);
+        }
+        n += 1;
+    }
+    Err("No hay nombre libre para la siguiente versión física".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,5 +667,38 @@ mod tests {
         let groups = group_files(&names, &codes);
         assert_eq!(groups.len(), 2);
         assert_eq!(count_principals(&names, &codes), 2);
+    }
+
+    #[test]
+    fn next_working_filename_bumps_vnn() {
+        assert_eq!(
+            next_working_filename("Modelo_v01.sdb", 2),
+            "Modelo_v02.sdb"
+        );
+        assert_eq!(
+            next_working_filename("1126 - MODELO_v01.sdb", 2),
+            "1126 - MODELO_v02.sdb"
+        );
+        assert_eq!(next_working_filename("Base.sdb", 1), "Base_v01.sdb");
+    }
+
+    #[test]
+    fn principal_open_prefers_docx_dwg_sdb_rvt() {
+        let files = [
+            ("a.log", Some("log")),
+            ("model.sdb", Some("sdb")),
+            ("note.docx", Some("docx")),
+            ("plan.dwg", Some("dwg")),
+        ];
+        let idx = pick_principal_open_index(files.iter().map(|(n, e)| (*n, *e))).unwrap();
+        assert_eq!(files[idx].0, "note.docx");
+
+        let files2 = [
+            ("model.sdb", Some("sdb")),
+            ("plan.dwg", Some("dwg")),
+            ("bim.rvt", Some("rvt")),
+        ];
+        let idx2 = pick_principal_open_index(files2.iter().map(|(n, e)| (*n, *e))).unwrap();
+        assert_eq!(files2[idx2].0, "plan.dwg");
     }
 }

@@ -65,6 +65,8 @@ export function DocumentInspector() {
   const [relType, setRelType] = useState("relacionado");
   const [relNotes, setRelNotes] = useState("");
   const [relError, setRelError] = useState<string | null>(null);
+  const [versionError, setVersionError] = useState<string | null>(null);
+  const [versionBusy, setVersionBusy] = useState(false);
 
   const activeVersionId =
     selectedVersionId ??
@@ -213,39 +215,74 @@ export function DocumentInspector() {
                 size="sm"
                 variant="secondary"
                 onClick={async () => {
-                  const picked = await open({
-                    multiple: false,
-                    title: "Adjuntar archivo a versión actual",
-                  });
-                  if (typeof picked !== "string" || !d.current_version_id) return;
-                  await api.attachFileToVersion({
-                    document_version_id: d.current_version_id,
-                    absolute_path: picked,
-                  });
-                  await qc.invalidateQueries({ queryKey: ["document", documentId] });
-                  await qc.invalidateQueries({ queryKey: ["documents"] });
-                  await qc.invalidateQueries({ queryKey: ["doc-version-files"] });
+                  try {
+                    setVersionError(null);
+                    const picked = await open({
+                      multiple: false,
+                      title: "Adjuntar archivo a versión actual",
+                    });
+                    if (typeof picked !== "string" || !d.current_version_id) return;
+                    await api.attachFileToVersion({
+                      document_version_id: d.current_version_id,
+                      absolute_path: picked,
+                      as_snapshot: false,
+                    });
+                    await qc.invalidateQueries({ queryKey: ["document", documentId] });
+                    await qc.invalidateQueries({ queryKey: ["documents"] });
+                    await qc.invalidateQueries({ queryKey: ["doc-version-files"] });
+                  } catch (e) {
+                    setVersionError(String(e));
+                  }
                 }}
               >
                 Adjuntar archivo
               </Button>
               <Button
                 size="sm"
+                disabled={versionBusy}
                 onClick={async () => {
-                  await api.createDocumentVersion({
-                    document_id: d.id,
-                    from_current: true,
-                    notes: "Nueva versión registrada",
-                  });
-                  await qc.invalidateQueries({ queryKey: ["document", documentId] });
-                  await qc.invalidateQueries({ queryKey: ["documents"] });
-                  await qc.invalidateQueries({ queryKey: ["doc-versions", documentId] });
-                  setInspectorTab("doc-versions");
+                  try {
+                    setVersionBusy(true);
+                    setVersionError(null);
+                    const picked = await open({
+                      multiple: false,
+                      title:
+                        "Vincular archivo existente como nueva versión (sin copiar). Cancelar = clonar versión actual.",
+                    });
+                    if (typeof picked === "string") {
+                      await api.createDocumentVersion({
+                        document_id: d.id,
+                        source_absolute_path: picked,
+                        from_current: false,
+                        notes: "Nueva versión vinculada a archivo existente",
+                      });
+                    } else {
+                      await api.createDocumentVersion({
+                        document_id: d.id,
+                        from_current: true,
+                        notes: "Nueva versión registrada",
+                      });
+                    }
+                    await qc.invalidateQueries({ queryKey: ["document", documentId] });
+                    await qc.invalidateQueries({ queryKey: ["documents"] });
+                    await qc.invalidateQueries({ queryKey: ["doc-versions", documentId] });
+                    await qc.invalidateQueries({ queryKey: ["doc-version-files"] });
+                    setInspectorTab("doc-versions");
+                  } catch (e) {
+                    setVersionError(String(e));
+                  } finally {
+                    setVersionBusy(false);
+                  }
                 }}
               >
                 Nueva versión
               </Button>
             </div>
+            {versionError && (
+              <div className="border border-error/40 bg-error/10 px-2 py-1.5 text-[12px] text-error">
+                {versionError}
+              </div>
+            )}
           </>
         )}
 
@@ -301,6 +338,9 @@ export function DocumentInspector() {
                     {f.format_label && (
                       <span className="ml-1 text-muted">[{f.format_label}]</span>
                     )}
+                    {f.is_available !== 1 && (
+                      <span className="ml-1 text-error">no disponible</span>
+                    )}
                     <div className="text-[10px] text-muted">
                       {formatBytes(f.size_bytes)}
                     </div>
@@ -308,15 +348,29 @@ export function DocumentInspector() {
                   <Button
                     size="sm"
                     variant="ghost"
-                    onClick={() =>
-                      api.openDocumentFile(f.id, f.relative_path.includes(".ingmanager/snapshots"))
-                    }
+                    disabled={f.is_available !== 1}
+                    onClick={async () => {
+                      try {
+                        setVersionError(null);
+                        await api.openDocumentFile(
+                          f.id,
+                          f.relative_path.includes(".ingmanager/snapshots"),
+                        );
+                      } catch (e) {
+                        setVersionError(String(e));
+                      }
+                    }}
                   >
                     Abrir
                   </Button>
                 </li>
               ))}
             </ul>
+            {versionError && inspectorTab === "doc-versions" && (
+              <div className="border border-error/40 bg-error/10 px-2 py-1.5 text-[12px] text-error">
+                {versionError}
+              </div>
+            )}
 
             {activeVersionId &&
               versions.data?.find((v) => v.id === activeVersionId)?.is_current !==

@@ -1,8 +1,9 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
 import { AlertTriangle, FilePlus2, Plus } from "lucide-react";
 import { api } from "@/lib/api";
+import type { DocumentRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui-store";
 import { Button } from "./ui/button";
@@ -13,6 +14,12 @@ interface Props {
 }
 
 const MEMORIA_STATUSES = ["desarrollo", "revision", "aprobada", "obsoleta"];
+
+interface DocContextMenu {
+  x: number;
+  y: number;
+  doc: DocumentRow;
+}
 
 export function DocumentBrowser({ projectId, categoryKey }: Props) {
   const qc = useQueryClient();
@@ -33,6 +40,7 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
   const [assignCode, setAssignCode] = useState(categoryKey !== "antecedentes");
   const [sourcePath, setSourcePath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<DocContextMenu | null>(null);
 
   const docs = useQuery({
     queryKey: ["documents", projectId, categoryKey],
@@ -93,6 +101,56 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
     onError: (e: Error) => setError(String(e)),
   });
 
+  const cleanupMut = useMutation({
+    mutationFn: () => api.cleanupDocumentAvailability(projectId, true),
+    onSuccess: async (r) => {
+      await qc.invalidateQueries({ queryKey: ["documents", projectId, categoryKey] });
+      await qc.invalidateQueries({ queryKey: ["categories", projectId] });
+      await qc.invalidateQueries({ queryKey: ["document"] });
+      await qc.invalidateQueries({ queryKey: ["doc-versions"] });
+      await qc.invalidateQueries({ queryKey: ["doc-version-files"] });
+      setError(null);
+      if (selectedDocumentId && r.document_ids_removed.includes(selectedDocumentId)) {
+        setSelectedDocumentId(null);
+      }
+      window.alert(
+        `Limpieza: ${r.marked_unavailable} archivo(s) marcados no disponible; ${r.deleted_empty_documents} documento(s) lógico(s) vacío(s) eliminados (archivos físicos conservados).`,
+      );
+    },
+    onError: (e: Error) => setError(String(e)),
+  });
+
+  async function deleteLogical(doc: DocumentRow) {
+    const label = doc.business_code ?? doc.title;
+    if (
+      !window.confirm(
+        `¿Eliminar documento lógico «${label}»?\n\nSolo se borra el registro en IngManager (SQLite). Los archivos físicos se conservan.`,
+      )
+    ) {
+      return;
+    }
+    try {
+      setError(null);
+      await api.deleteLogicalDocument(doc.id);
+      if (selectedDocumentId === doc.id) setSelectedDocumentId(null);
+      await qc.invalidateQueries({ queryKey: ["documents", projectId, categoryKey] });
+      await qc.invalidateQueries({ queryKey: ["categories", projectId] });
+      await qc.invalidateQueries({ queryKey: ["document", doc.id] });
+      await qc.invalidateQueries({ queryKey: ["doc-versions", doc.id] });
+      setCtxMenu(null);
+    } catch (e) {
+      setError(String(e));
+      setCtxMenu(null);
+    }
+  }
+
+  function onDocContextMenu(e: ReactMouseEvent, doc: DocumentRow) {
+    e.preventDefault();
+    e.stopPropagation();
+    setSelectedDocumentId(doc.id);
+    setCtxMenu({ x: e.clientX, y: e.clientY, doc });
+  }
+
   const statuses = useMemo(() => {
     if (categoryKey === "memorias") return MEMORIA_STATUSES;
     return ["active", "archived", "obsoleta"];
@@ -123,15 +181,26 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
           <Plus size={14} /> Nuevo documento
         </Button>
         {categoryKey === "modelos" && (
-          <Button
-            size="sm"
-            variant="secondary"
-            disabled={bulkReg.isPending}
-            onClick={() => bulkReg.mutate()}
-            title="Registrar documentos lógicos desde .sdb principales sin copiar archivos"
-          >
-            <FilePlus2 size={14} /> Registrar modelos…
-          </Button>
+          <>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={bulkReg.isPending}
+              onClick={() => bulkReg.mutate()}
+              title="Registrar documentos lógicos desde .sdb principales sin copiar archivos"
+            >
+              <FilePlus2 size={14} /> Registrar modelos…
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={cleanupMut.isPending}
+              onClick={() => cleanupMut.mutate()}
+              title="Marcar archivos faltantes como no disponible y quitar documentos lógicos vacíos (sin borrar archivos)"
+            >
+              Limpiar fantasmas…
+            </Button>
+          </>
         )}
         <label className="ml-auto flex items-center gap-2 text-[12px] text-muted">
           <input
@@ -148,10 +217,18 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
         )}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div
+        className="min-h-0 flex-1 overflow-auto"
+        onClick={() => setCtxMenu(null)}
+      >
         {docs.isLoading && <div className="p-4 text-muted">Cargando documentos…</div>}
         {docs.error && (
           <div className="p-4 text-error">{String(docs.error)}</div>
+        )}
+        {error && (
+          <div className="m-3 border border-error/40 bg-error/10 px-3 py-2 text-[12.5px] text-error">
+            {error}
+          </div>
         )}
         {!docs.isLoading && (docs.data?.length ?? 0) === 0 && (
           <div className="p-8 text-center text-muted">
@@ -188,7 +265,9 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
                   onClick={() => {
                     setSelectedDocumentId(d.id);
                     setInspectorTab("doc-detail");
+                    setCtxMenu(null);
                   }}
+                  onContextMenu={(e) => onDocContextMenu(e, d)}
                 >
                   <td className="px-3 font-mono text-[12px] text-accent">
                     {d.business_code ?? "—"}
@@ -202,6 +281,11 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
                           className="inline-flex text-warn"
                         >
                           <AlertTriangle size={12} />
+                        </span>
+                      )}
+                      {d.file_count === 0 && (
+                        <span className="text-[10px] uppercase text-error">
+                          no disponible
                         </span>
                       )}
                     </span>
@@ -223,6 +307,32 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
               ))}
             </tbody>
           </table>
+        )}
+        {ctxMenu && (
+          <div
+            className="fixed z-50 min-w-[220px] border border-border bg-panel py-1 shadow-lg"
+            style={{ left: ctxMenu.x, top: ctxMenu.y }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              className="block w-full px-3 py-1.5 text-left text-[12.5px] hover:bg-elevated"
+              onClick={() => {
+                setSelectedDocumentId(ctxMenu.doc.id);
+                setInspectorTab("doc-detail");
+                setCtxMenu(null);
+              }}
+            >
+              Abrir detalle
+            </button>
+            <button
+              type="button"
+              className="block w-full px-3 py-1.5 text-left text-[12.5px] text-error hover:bg-elevated"
+              onClick={() => void deleteLogical(ctxMenu.doc)}
+            >
+              Eliminar documento lógico…
+            </button>
+          </div>
         )}
       </div>
 

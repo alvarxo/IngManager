@@ -59,101 +59,13 @@ pub fn parse_version_filename(file_name: &str) -> ParsedVersionName {
 }
 
 fn try_parse_stem(stem: &str) -> Option<(String, Option<String>)> {
-    // name (12)
-    if let Some(open) = stem.rfind(" (") {
-        if stem.ends_with(')') {
-            let inner = &stem[open + 2..stem.len() - 1];
-            if !inner.is_empty() && inner.chars().all(|c| c.is_ascii_digit()) {
-                let base = stem[..open].trim();
-                if !base.is_empty() {
-                    return Some((base.to_string(), Some(inner.to_string())));
-                }
-            }
-        }
+    let trimmed = stem.trim();
+    let (base, hint) = crate::engineering_files::strip_version_suffix(trimmed);
+    if base == trimmed && hint.is_none() {
+        None
+    } else {
+        Some((base, hint))
     }
-
-    // name - Copy / name – Copia / name - Copy (2)
-    let lower = stem.to_lowercase();
-    for marker in [" - copy", " – copy", " - copia", " – copia"] {
-        if let Some(idx) = lower.rfind(marker) {
-            let base = stem[..idx].trim();
-            if base.is_empty() {
-                continue;
-            }
-            let rest = &stem[idx + marker.len()..];
-            let hint = parse_trailing_paren_num(rest.trim());
-            return Some((base.to_string(), hint));
-        }
-    }
-
-    // Split on last _ or -
-    if let Some(idx) = stem.rfind(['_', '-']) {
-        let base = stem[..idx].trim();
-        let suffix = &stem[idx + 1..];
-        if base.is_empty() || suffix.is_empty() {
-            return None;
-        }
-        let suf_l = suffix.to_lowercase();
-
-        // v01 / v1
-        if suf_l.starts_with('v') {
-            let num = &suf_l[1..];
-            if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) {
-                return Some((base.to_string(), Some(num.to_string())));
-            }
-        }
-
-        // revA / rev.B / rev02
-        if let Some(rest) = suf_l.strip_prefix("rev") {
-            let rest = rest.trim_start_matches('.');
-            if !rest.is_empty()
-                && rest.len() <= 4
-                && rest.chars().all(|c| c.is_ascii_alphanumeric())
-            {
-                // Preserve original hint casing from suffix after "rev"
-                let raw = suffix;
-                let hint = if let Some(r) = raw
-                    .to_lowercase()
-                    .strip_prefix("rev")
-                    .map(|_| &raw[3..])
-                {
-                    r.trim_start_matches('.').to_string()
-                } else {
-                    rest.to_string()
-                };
-                return Some((base.to_string(), Some(hint)));
-            }
-        }
-
-        // copy / copia / copy2 / copia_3
-        if suf_l == "copy" || suf_l == "copia" {
-            return Some((base.to_string(), None));
-        }
-        for prefix in ["copy", "copia"] {
-            if let Some(rest) = suf_l.strip_prefix(prefix) {
-                let rest = rest.trim_start_matches(['_', '-']);
-                if rest.is_empty() {
-                    return Some((base.to_string(), None));
-                }
-                if rest.chars().all(|c| c.is_ascii_digit()) {
-                    return Some((base.to_string(), Some(rest.to_string())));
-                }
-            }
-        }
-    }
-
-    None
-}
-
-fn parse_trailing_paren_num(s: &str) -> Option<String> {
-    let s = s.trim();
-    if s.starts_with('(') && s.ends_with(')') {
-        let inner = &s[1..s.len() - 1];
-        if !inner.is_empty() && inner.chars().all(|c| c.is_ascii_digit()) {
-            return Some(inner.to_string());
-        }
-    }
-    None
 }
 
 fn normalize_stem(s: &str) -> String {
@@ -575,32 +487,22 @@ async fn create_auto_version(
         None => "Auto-versión por patrón Save As".into(),
     };
 
-    let snap_dir = snapshots_dir(root, document_id, next_n);
-    fs::create_dir_all(&snap_dir)?;
-    let dest = snap_dir.join(&file_name);
-    let dest = if dest.exists() {
-        crate::fs_util::unique_destination(&snap_dir, &file_name)
-    } else {
-        dest
-    };
-    fs::copy(source, &dest)?;
-    let snap_rel = pathdiff_rel(root, &snap_dir)?;
-    let stored_rel = pathdiff_rel(root, &dest)?;
-    let source_rel = pathdiff_rel(root, source).ok();
+    // Link the working file in place (no snapshot copy) — versions share the physical tree.
+    let source_rel = pathdiff_rel(root, source)?;
+    let _ = snapshots_dir(root, document_id, next_n); // keep helper used for path conventions
 
     let mut tx = pool.begin().await?;
     sqlx::query(
         "INSERT INTO document_versions (
             id, document_id, version_number, label, notes, created_at,
             snapshot_relative_path, registered_fingerprint, source_relative_path, is_snapshot
-         ) VALUES (?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, 1)",
+         ) VALUES (?, ?, ?, ?, ?, datetime('now'), NULL, ?, ?, 0)",
     )
     .bind(&version_id)
     .bind(document_id)
     .bind(next_n)
     .bind(version_label(next_n))
     .bind(&notes)
-    .bind(&snap_rel)
     .bind(&fp)
     .bind(&source_rel)
     .execute(&mut *tx)
@@ -623,7 +525,7 @@ async fn create_auto_version(
     )
     .bind(&file_id)
     .bind(&version_id)
-    .bind(&stored_rel)
+    .bind(&source_rel)
     .bind(&file_name)
     .bind(&extension)
     .bind(size as i64)

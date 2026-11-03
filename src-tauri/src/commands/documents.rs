@@ -652,9 +652,16 @@ pub async fn list_document_versions(
     state: State<'_, AppState>,
     document_id: String,
 ) -> AppResult<Vec<DocumentVersionRow>> {
+    list_document_versions_inner(&state, &document_id).await
+}
+
+pub async fn list_document_versions_inner(
+    state: &AppState,
+    document_id: &str,
+) -> AppResult<Vec<DocumentVersionRow>> {
     let current_id: Option<String> =
         sqlx::query_as::<_, (Option<String>,)>("SELECT current_version_id FROM documents WHERE id = ?")
-            .bind(&document_id)
+            .bind(document_id)
             .fetch_optional(&state.pool)
             .await?
             .and_then(|r| r.0);
@@ -666,7 +673,7 @@ pub async fn list_document_versions(
          WHERE document_id = ?
          ORDER BY version_number DESC",
     )
-    .bind(&document_id)
+    .bind(document_id)
     .fetch_all(&state.pool)
     .await?;
 
@@ -688,6 +695,13 @@ pub async fn list_version_files(
     state: State<'_, AppState>,
     version_id: String,
 ) -> AppResult<Vec<DocumentFileRow>> {
+    list_version_files_inner(&state, &version_id).await
+}
+
+pub async fn list_version_files_inner(
+    state: &AppState,
+    version_id: &str,
+) -> AppResult<Vec<DocumentFileRow>> {
     sqlx::query_as::<_, DocumentFileRow>(
         "SELECT id, document_version_id, relative_path, file_name, extension,
                 size_bytes, modified_at, content_hash, is_available, format_label,
@@ -707,8 +721,21 @@ pub async fn create_document_version(
     state: State<'_, AppState>,
     input: CreateVersionInput,
 ) -> AppResult<DocumentVersionRow> {
-    let loc = loc_for_document(&state, &input.document_id).await?;
-    let doc = fetch_document(&state, &input.document_id).await?;
+    create_document_version_inner(&state, input).await
+}
+
+pub async fn create_document_version_inner(
+    state: &AppState,
+    input: CreateVersionInput,
+) -> AppResult<DocumentVersionRow> {
+    let loc = loc_for_document(state, &input.document_id).await?;
+    let doc = fetch_document(state, &input.document_id).await?;
+    let from_current = input.from_current.unwrap_or(false);
+    if input.source_absolute_path.is_none() && !from_current {
+        return Err(AppError::msg(
+            "Indique un archivo fuente o use from_current para Nueva versión",
+        ));
+    }
 
     let max_n: (i64,) = sqlx::query_as(
         "SELECT COALESCE(MAX(version_number), 0) FROM document_versions WHERE document_id = ?",
@@ -718,6 +745,7 @@ pub async fn create_document_version(
     .await?;
     let next_n = max_n.0 + 1;
     let version_id = Uuid::new_v4().to_string();
+    let prev_current = doc.current_version_id.clone();
 
     sqlx::query(
         "INSERT INTO document_versions (
@@ -740,48 +768,135 @@ pub async fn create_document_version(
     .execute(&state.pool)
     .await?;
 
-    if let Some(src) = input.source_absolute_path {
-        // New working version links the source file (no forced snapshot).
-        let _ = attach_file_inner(
-            &state,
-            &version_id,
-            &src,
-            None,
-            None,
-            false,
-            None,
-        )
-        .await?;
-    } else if input.from_current.unwrap_or(false) {
-        if let Some(cur) = doc.current_version_id {
+    let mut linked_ok = 0usize;
+    let mut missing = 0usize;
+    let mut last_err: Option<String> = None;
+
+    if let Some(src) = &input.source_absolute_path {
+        match attach_file_inner(state, &version_id, src, None, None, false, None).await {
+            Ok(_) => linked_ok += 1,
+            Err(e) => last_err = Some(e.to_string()),
+        }
+    } else if from_current {
+        if let Some(cur) = prev_current.clone() {
             if cur != version_id {
-                let files = list_version_files(state.clone(), cur).await?;
+                let files = list_version_files_inner(state, &cur).await?;
+                if files.is_empty() {
+                    rollback_empty_version(state, &input.document_id, &version_id, cur.as_str())
+                        .await?;
+                    return Err(AppError::msg(
+                        "La versión actual no tiene archivos; no se creó vacio",
+                    ));
+                }
                 for f in files {
                     let abs = join_under_root(&loc.root_path, &f.relative_path)?;
                     if abs.is_file() {
-                        // Preserve working links; snapshots stay as snapshot copies.
                         let is_snap_path = f.relative_path.contains(".ingmanager/snapshots");
-                        let _ = attach_file_inner(
-                            &state,
+                        match attach_file_inner(
+                            state,
                             &version_id,
                             &abs.display().to_string(),
-                            f.format_label,
+                            f.format_label.clone(),
                             None,
                             is_snap_path,
                             None,
                         )
-                        .await?;
+                        .await
+                        {
+                            Ok(_) => linked_ok += 1,
+                            Err(e) => last_err = Some(e.to_string()),
+                        }
+                    } else {
+                        insert_unavailable_file_row(state, &version_id, &f).await?;
+                        missing += 1;
                     }
                 }
             }
         }
     }
 
-    let versions = list_document_versions(state, input.document_id).await?;
+    if linked_ok == 0 {
+        if let Some(prev) = prev_current {
+            let _ = rollback_empty_version(state, &input.document_id, &version_id, &prev).await;
+        } else {
+            let _ = sqlx::query("DELETE FROM document_files WHERE document_version_id = ?")
+                .bind(&version_id)
+                .execute(&state.pool)
+                .await;
+            let _ = sqlx::query("DELETE FROM document_versions WHERE id = ?")
+                .bind(&version_id)
+                .execute(&state.pool)
+                .await;
+        }
+        let detail = last_err.unwrap_or_else(|| {
+            if missing > 0 {
+                format!("{missing} archivo(s) no disponible(s) en disco")
+            } else {
+                "sin archivos vinculados".into()
+            }
+        });
+        return Err(AppError::msg(format!(
+            "No se creó la versión: {detail}. Elija un archivo existente para vincular."
+        )));
+    }
+
+    let versions = list_document_versions_inner(state, &input.document_id).await?;
     versions
         .into_iter()
         .find(|v| v.id == version_id)
         .ok_or_else(|| AppError::msg("Versión creada no encontrada"))
+}
+
+async fn rollback_empty_version(
+    state: &AppState,
+    document_id: &str,
+    new_version_id: &str,
+    previous_version_id: &str,
+) -> AppResult<()> {
+    sqlx::query("DELETE FROM document_files WHERE document_version_id = ?")
+        .bind(new_version_id)
+        .execute(&state.pool)
+        .await?;
+    sqlx::query("DELETE FROM document_versions WHERE id = ?")
+        .bind(new_version_id)
+        .execute(&state.pool)
+        .await?;
+    sqlx::query(
+        "UPDATE documents SET current_version_id = ?, updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(previous_version_id)
+    .bind(document_id)
+    .execute(&state.pool)
+    .await?;
+    Ok(())
+}
+
+async fn insert_unavailable_file_row(
+    state: &AppState,
+    version_id: &str,
+    source: &DocumentFileRow,
+) -> AppResult<()> {
+    let id = Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO document_files (
+            id, document_version_id, relative_path, file_name, extension,
+            size_bytes, modified_at, content_hash, is_available, format_label,
+            revision_id, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, datetime('now'))",
+    )
+    .bind(&id)
+    .bind(version_id)
+    .bind(&source.relative_path)
+    .bind(&source.file_name)
+    .bind(&source.extension)
+    .bind(source.size_bytes)
+    .bind(&source.modified_at)
+    .bind(&source.content_hash)
+    .bind(&source.format_label)
+    .bind(&source.revision_id)
+    .execute(&state.pool)
+    .await?;
+    Ok(())
 }
 
 /// Restore a historical version by creating a NEW current version (does not rewrite history).
@@ -793,12 +908,15 @@ pub async fn restore_document_version(
     notes: Option<String>,
 ) -> AppResult<DocumentVersionRow> {
     let loc = loc_for_document(&state, &document_id).await?;
-    let source_files = list_version_files(state.clone(), version_id.clone()).await?;
+    let source_files = list_version_files_inner(&state, &version_id).await?;
     if source_files.is_empty() {
         return Err(AppError::msg(
             "La versión a restaurar no tiene archivos asociados",
         ));
     }
+
+    let prev_doc = fetch_document(&state, &document_id).await?;
+    let prev_current = prev_doc.current_version_id.clone();
 
     let max_n: (i64,) = sqlx::query_as(
         "SELECT COALESCE(MAX(version_number), 0) FROM document_versions WHERE document_id = ?",
@@ -831,25 +949,36 @@ pub async fn restore_document_version(
     .execute(&state.pool)
     .await?;
 
+    let mut linked_ok = 0usize;
     for f in source_files {
         let abs = join_under_root(&loc.root_path, &f.relative_path)?;
         if abs.is_file() {
-            // Restored current version links working copies when possible.
             let is_snap_path = f.relative_path.contains(".ingmanager/snapshots");
-            let _ = attach_file_inner(
+            attach_file_inner(
                 &state,
                 &new_id,
                 &abs.display().to_string(),
-                f.format_label,
+                f.format_label.clone(),
                 None,
                 is_snap_path,
                 None,
             )
             .await?;
+            linked_ok += 1;
+        } else {
+            insert_unavailable_file_row(&state, &new_id, &f).await?;
         }
     }
+    if linked_ok == 0 {
+        if let Some(prev) = prev_current {
+            let _ = rollback_empty_version(&state, &document_id, &new_id, &prev).await;
+        }
+        return Err(AppError::msg(
+            "No se pudo restaurar: ningún archivo físico está disponible",
+        ));
+    }
 
-    let versions = list_document_versions(state, document_id).await?;
+    let versions = list_document_versions_inner(&state, &document_id).await?;
     versions
         .into_iter()
         .find(|v| v.id == new_id)
@@ -878,7 +1007,12 @@ pub async fn open_document_file(
     let loc = crate::project_paths::resolve_project_location(&state.pool, &project_id).await?;
     let src = join_under_root(&loc.root_path, &rel)?;
     if !src.is_file() {
-        return Err(AppError::msg("El archivo físico no está disponible"));
+        sqlx::query("UPDATE document_files SET is_available = 0 WHERE id = ?")
+            .bind(&file_id)
+            .execute(&state.pool)
+            .await
+            .ok();
+        return Err(AppError::msg("Archivo no disponible"));
     }
 
     let force_temp = use_temp_copy.unwrap_or(is_snapshot == 1);
@@ -1243,4 +1377,192 @@ pub async fn is_document_favorite(
     .fetch_optional(&state.pool)
     .await?;
     Ok(row.is_some())
+}
+
+/// Delete a logical document from SQLite only. Physical files on disk are kept.
+#[tauri::command]
+pub async fn delete_logical_document(
+    state: State<'_, AppState>,
+    document_id: String,
+) -> AppResult<()> {
+    delete_logical_document_inner(&state.pool, &document_id).await
+}
+
+pub async fn delete_logical_document_inner(
+    pool: &sqlx::SqlitePool,
+    document_id: &str,
+) -> AppResult<()> {
+    let doc: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT project_id, business_code FROM documents WHERE id = ?")
+            .bind(document_id)
+            .fetch_optional(pool)
+            .await?;
+    let Some((project_id, code)) = doc else {
+        return Err(AppError::msg("Documento lógico no encontrado"));
+    };
+
+    let mut tx = pool.begin().await?;
+
+    let version_ids: Vec<(String,)> =
+        sqlx::query_as("SELECT id FROM document_versions WHERE document_id = ?")
+            .bind(document_id)
+            .fetch_all(&mut *tx)
+            .await?;
+
+    for (vid,) in &version_ids {
+        sqlx::query("DELETE FROM document_files WHERE document_version_id = ?")
+            .bind(vid)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    sqlx::query("DELETE FROM revisions WHERE document_id = ?")
+        .bind(document_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "DELETE FROM document_relationships
+         WHERE source_document_id = ? OR target_document_id = ?",
+    )
+    .bind(document_id)
+    .bind(document_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM favorites WHERE entity_type = 'document' AND entity_id = ?")
+        .bind(document_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM file_version_tracking WHERE document_id = ?")
+        .bind(document_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM engineering_groups WHERE document_id = ?")
+        .bind(document_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE documents SET current_version_id = NULL WHERE id = ?")
+        .bind(document_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM document_versions WHERE document_id = ?")
+        .bind(document_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM documents WHERE id = ?")
+        .bind(document_id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+
+    crate::audit::log_event(
+        pool,
+        Some(&project_id),
+        "document",
+        Some(document_id),
+        "delete_logical",
+        Some(&format!(
+            "Eliminado documento lógico {} (archivos físicos conservados)",
+            code.unwrap_or_else(|| document_id.to_string())
+        )),
+    )
+    .await
+    .ok();
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AvailabilityCleanupResult {
+    pub marked_unavailable: usize,
+    pub deleted_empty_documents: usize,
+    pub document_ids_removed: Vec<String>,
+}
+
+/// Mark missing physical files as unavailable; optionally remove empty logical docs
+/// (no available files) without opening/touching files on disk beyond existence checks.
+#[tauri::command]
+pub async fn cleanup_document_availability(
+    state: State<'_, AppState>,
+    project_id: String,
+    delete_empty_logicals: Option<bool>,
+) -> AppResult<AvailabilityCleanupResult> {
+    cleanup_document_availability_inner(
+        &state.pool,
+        &project_id,
+        delete_empty_logicals.unwrap_or(true),
+    )
+    .await
+}
+
+pub async fn cleanup_document_availability_inner(
+    pool: &sqlx::SqlitePool,
+    project_id: &str,
+    delete_empty_logicals: bool,
+) -> AppResult<AvailabilityCleanupResult> {
+    let loc = crate::project_paths::resolve_project_location(pool, project_id).await?;
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT f.id, f.relative_path
+         FROM document_files f
+         JOIN document_versions v ON v.id = f.document_version_id
+         JOIN documents d ON d.id = v.document_id
+         WHERE d.project_id = ? AND f.is_available = 1",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut marked = 0usize;
+    for (fid, rel) in rows {
+        let abs = join_under_root(&loc.root_path, &rel)?;
+        if !abs.is_file() {
+            sqlx::query("UPDATE document_files SET is_available = 0 WHERE id = ?")
+                .bind(&fid)
+                .execute(pool)
+                .await?;
+            marked += 1;
+        }
+    }
+
+    let mut removed = Vec::new();
+    if delete_empty_logicals {
+        let empty_docs: Vec<(String,)> = sqlx::query_as(
+            "SELECT d.id FROM documents d
+             WHERE d.project_id = ?
+               AND NOT EXISTS (
+                 SELECT 1 FROM document_versions v
+                 JOIN document_files f ON f.document_version_id = v.id
+                 WHERE v.document_id = d.id AND f.is_available = 1
+               )",
+        )
+        .bind(project_id)
+        .fetch_all(pool)
+        .await?;
+        for (id,) in empty_docs {
+            delete_logical_document_inner(pool, &id).await?;
+            removed.push(id);
+        }
+    }
+
+    Ok(AvailabilityCleanupResult {
+        marked_unavailable: marked,
+        deleted_empty_documents: removed.len(),
+        document_ids_removed: removed,
+    })
+}
+
+/// Mark document_files unavailable when a relative path under a project root is removed.
+pub async fn mark_document_files_unavailable_for_path(
+    pool: &sqlx::SqlitePool,
+    relative_path: &str,
+) -> AppResult<u64> {
+    let res = sqlx::query(
+        "UPDATE document_files SET is_available = 0
+         WHERE is_available = 1 AND (relative_path = ? OR relative_path LIKE ?)",
+    )
+    .bind(relative_path)
+    .bind(format!("{relative_path}/%"))
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
 }

@@ -10,6 +10,8 @@ mod doc_codes;
 mod engineering_files;
 #[cfg(test)]
 mod engineering_sap_tests;
+#[cfg(test)]
+mod models_versions_hotfix_tests;
 mod error;
 #[cfg(test)]
 mod flexibility_tests;
@@ -84,6 +86,8 @@ pub fn run() {
             commands::documents::list_version_files,
             commands::documents::create_document_version,
             commands::documents::restore_document_version,
+            commands::documents::delete_logical_document,
+            commands::documents::cleanup_document_availability,
             commands::documents::open_document_file,
             commands::documents::list_revisions,
             commands::documents::create_revision,

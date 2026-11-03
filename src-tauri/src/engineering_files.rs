@@ -66,6 +66,9 @@ pub struct EngineeringGroup {
     pub group_key: String,
     pub title: String,
     pub principal: Option<ClassifiedFile>,
+    /// All principal files that share this identity (e.g. `Modelo.sdb`, `Modelo_v02.sdb`).
+    /// Ordered oldest → newest by version hint when present.
+    pub version_principals: Vec<ClassifiedFile>,
     pub auxiliaries: Vec<ClassifiedFile>,
     pub standalone: Vec<ClassifiedFile>,
 }
@@ -114,12 +117,117 @@ pub fn strip_project_code_prefix(name: &str, project_codes: &[String]) -> String
     rest
 }
 
+/// Strip Save-As / revision suffixes that are versions, not identity.
+/// Examples: `_v01`, `-v2`, `_revB`, ` (2)`, ` - Copy`, `_copia3`.
+/// Does **not** touch SIN/CON CAMIONES (or similar) wording.
+pub fn strip_version_suffix(stem: &str) -> (String, Option<String>) {
+    let stem = stem.trim();
+    if stem.is_empty() {
+        return (String::new(), None);
+    }
+
+    // name (12)
+    if let Some(open) = stem.rfind(" (") {
+        if stem.ends_with(')') {
+            let inner = &stem[open + 2..stem.len() - 1];
+            if !inner.is_empty() && inner.chars().all(|c| c.is_ascii_digit()) {
+                let base = stem[..open].trim();
+                if !base.is_empty() {
+                    return (base.to_string(), Some(inner.to_string()));
+                }
+            }
+        }
+    }
+
+    // name - Copy / name – Copia / name - Copy (2)
+    let lower = stem.to_lowercase();
+    for marker in [" - copy", " – copy", " - copia", " – copia"] {
+        if let Some(idx) = lower.rfind(marker) {
+            let base = stem[..idx].trim();
+            if base.is_empty() {
+                continue;
+            }
+            let rest = &stem[idx + marker.len()..];
+            let hint = trailing_paren_num(rest.trim());
+            return (base.to_string(), hint);
+        }
+    }
+
+    if let Some(idx) = stem.rfind(['_', '-']) {
+        let base = stem[..idx].trim();
+        let suffix = &stem[idx + 1..];
+        if !base.is_empty() && !suffix.is_empty() {
+            let suf_l = suffix.to_lowercase();
+
+            // v01 / v1
+            if suf_l.starts_with('v') {
+                let num = &suf_l[1..];
+                if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) {
+                    return (base.to_string(), Some(num.to_string()));
+                }
+            }
+
+            // revA / rev.B / rev02
+            if let Some(rest) = suf_l.strip_prefix("rev") {
+                let rest = rest.trim_start_matches('.');
+                if !rest.is_empty()
+                    && rest.len() <= 4
+                    && rest.chars().all(|c| c.is_ascii_alphanumeric())
+                {
+                    let raw = suffix;
+                    let hint = raw
+                        .get(3..)
+                        .map(|r| r.trim_start_matches('.').to_string())
+                        .unwrap_or_else(|| rest.to_string());
+                    return (base.to_string(), Some(hint));
+                }
+            }
+
+            if suf_l == "copy" || suf_l == "copia" {
+                return (base.to_string(), None);
+            }
+            for prefix in ["copy", "copia"] {
+                if let Some(rest) = suf_l.strip_prefix(prefix) {
+                    let rest = rest.trim_start_matches(['_', '-']);
+                    if rest.is_empty() {
+                        return (base.to_string(), None);
+                    }
+                    if rest.chars().all(|c| c.is_ascii_digit()) {
+                        return (base.to_string(), Some(rest.to_string()));
+                    }
+                }
+            }
+        }
+    }
+
+    (stem.to_string(), None)
+}
+
+fn trailing_paren_num(s: &str) -> Option<String> {
+    let s = s.trim();
+    if s.starts_with('(') && s.ends_with(')') {
+        let inner = &s[1..s.len() - 1];
+        if !inner.is_empty() && inner.chars().all(|c| c.is_ascii_digit()) {
+            return Some(inner.to_string());
+        }
+    }
+    None
+}
+
+/// Parse version hint from a file name (stem or full name).
+pub fn version_hint_from_name(file_name: &str) -> Option<String> {
+    let stem = raw_stem(file_name);
+    strip_version_suffix(&stem).1
+}
+
 /// Normalize a group identity: lowercase, collapse whitespace, keep SIN/CON wording.
+/// Version suffixes (`_v01`, `_revA`, …) are **not** part of identity.
 pub fn normalize_group_key(stem: &str, project_codes: &[String]) -> String {
     let stripped = strip_project_code_prefix(stem, project_codes);
     // Also strip a leading AANN-looking code even if not in the list
     let stripped = strip_leading_aann_public(&stripped);
-    stripped
+    let (without_ver, _) = strip_version_suffix(&stripped);
+    without_ver
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -134,12 +242,17 @@ pub fn strip_leading_aann_public(name: &str) -> String {
 fn strip_leading_aann_like(name: &str) -> String {
     let trimmed = name.trim();
     let bytes = trimmed.as_bytes();
-    // 2–6 digit / alnum project-ish token then separator
+    // Project-code-ish token: must *start with a digit* (1090, P1090→ handled by letter+digits
+    // only when mostly numeric). Never strip words like MODELO_v01 → v01.
     let mut i = 0usize;
     while i < bytes.len() && (bytes[i].is_ascii_alphanumeric()) {
         i += 1;
     }
     if i >= 2 && i <= 8 && i < bytes.len() {
+        let token = &trimmed[..i];
+        if !looks_like_project_code_token(token) {
+            return trimmed.to_string();
+        }
         let sep = bytes[i];
         if matches!(sep, b'-' | b'_' | b'.' | b' ') {
             let mut j = i;
@@ -169,6 +282,16 @@ fn strip_leading_aann_like(name: &str) -> String {
         }
     }
     trimmed.to_string()
+}
+
+fn looks_like_project_code_token(token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    let digits = token.chars().filter(|c| c.is_ascii_digit()).count();
+    let letters = token.chars().filter(|c| c.is_ascii_alphabetic()).count();
+    // Pure digits (1090) or letter+digits project-ish (P1090, AANN) — not words (MODELO)
+    digits >= 2 && digits >= letters
 }
 
 fn looks_like_category_or_model(s: &str) -> bool {
@@ -228,8 +351,24 @@ pub fn classify_file_name(file_name: &str, project_codes: &[String]) -> Classifi
     }
 }
 
+fn version_sort_key(file_name: &str) -> (u8, u64, String) {
+    match version_hint_from_name(file_name) {
+        Some(h) => {
+            if let Ok(n) = h.parse::<u64>() {
+                (1, n, h.to_lowercase())
+            } else {
+                // letter revisions: A < B; treat as mid-tier after numeric
+                let ord = h.chars().next().map(|c| c.to_ascii_lowercase() as u64).unwrap_or(0);
+                (2, ord, h.to_lowercase())
+            }
+        }
+        // Unversioned baseline sorts first
+        None => (0, 0, file_name.to_lowercase()),
+    }
+}
+
 /// Group a list of file names. Principals win; auxiliaries attach to same group_key.
-/// `SIN CAMIONES` and `CON CAMIONES` remain separate groups.
+/// Versioned stems (`_v01` / `_v02`) share identity; `SIN`/`CON CAMIONES` stay separate.
 pub fn group_files(file_names: &[String], project_codes: &[String]) -> Vec<EngineeringGroup> {
     let classified: Vec<ClassifiedFile> = file_names
         .iter()
@@ -244,31 +383,20 @@ pub fn group_files(file_names: &[String], project_codes: &[String]) -> Vec<Engin
     let mut groups = Vec::new();
     for (group_key, mut files) in map {
         files.sort_by(|a, b| a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase()));
-        let mut principal = None;
+        let mut version_principals = Vec::new();
         let mut auxiliaries = Vec::new();
         let mut standalone = Vec::new();
 
-        // Prefer SAP/other principal; if multiple principals (unusual), keep first by name
         for f in files {
             match f.role {
-                FileRole::Principal => {
-                    if principal.is_none() {
-                        principal = Some(f);
-                    } else {
-                        // Extra principal with same key — keep as standalone sibling
-                        standalone.push(f);
-                    }
-                }
+                FileRole::Principal => version_principals.push(f),
                 FileRole::Auxiliary => auxiliaries.push(f),
-                FileRole::Standalone => {
-                    // If no principal yet, a standalone can become the display principal later
-                    standalone.push(f);
-                }
+                FileRole::Standalone => standalone.push(f),
             }
         }
 
-        // If only auxiliaries/standalone exist, promote first standalone or leave principal None
-        if principal.is_none() {
+        // If only auxiliaries/standalone exist, promote first standalone
+        if version_principals.is_empty() {
             if let Some(idx) = standalone
                 .iter()
                 .position(|s| {
@@ -280,17 +408,31 @@ pub fn group_files(file_names: &[String], project_codes: &[String]) -> Vec<Engin
                 .or_else(|| standalone.first().map(|_| 0))
             {
                 let promoted = standalone.remove(idx);
-                principal = Some(ClassifiedFile {
+                version_principals.push(ClassifiedFile {
                     role: FileRole::Principal,
                     ..promoted
                 });
             }
         }
 
-        // Auxiliaries without a principal stay listed under this group
+        version_principals.sort_by(|a, b| {
+            version_sort_key(&a.file_name).cmp(&version_sort_key(&b.file_name))
+        });
+
+        // Display / "current" principal = newest version variant when present
+        let principal = version_principals.last().cloned();
+
         let title = principal
             .as_ref()
-            .map(|p| p.stem.clone())
+            .map(|p| {
+                // Prefer identity stem without version suffix for logical title
+                let (base, _) = strip_version_suffix(&p.stem);
+                if base.trim().is_empty() {
+                    p.stem.clone()
+                } else {
+                    base
+                }
+            })
             .or_else(|| auxiliaries.first().map(|a| a.stem.clone()))
             .or_else(|| standalone.first().map(|s| s.stem.clone()))
             .unwrap_or_else(|| group_key.clone());
@@ -299,6 +441,7 @@ pub fn group_files(file_names: &[String], project_codes: &[String]) -> Vec<Engin
             group_key,
             title,
             principal,
+            version_principals,
             auxiliaries,
             standalone,
         });
@@ -333,7 +476,11 @@ pub fn filter_visible_names(
     let groups = group_files(file_names, project_codes);
     let mut out = Vec::new();
     for g in groups {
-        if let Some(p) = g.principal {
+        if !g.version_principals.is_empty() {
+            for p in g.version_principals {
+                out.push(p.file_name);
+            }
+        } else if let Some(p) = g.principal {
             out.push(p.file_name);
         }
         for s in g.standalone {
@@ -408,5 +555,35 @@ mod tests {
         let visible = filter_visible_names(&names, &[], false);
         assert_eq!(visible, vec!["A.sdb".to_string(), "B.sdb".to_string()]);
         assert_eq!(count_principals(&names, &[]), 2);
+    }
+
+    #[test]
+    fn version_suffixes_are_not_identity() {
+        let a = normalize_group_key("Puente_v01", &[]);
+        let b = normalize_group_key("Puente_v02", &[]);
+        let c = normalize_group_key("Puente", &[]);
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+        let names = vec![
+            "1126 - MODELO_v01.sdb".into(),
+            "1126 - MODELO_v02.sdb".into(),
+        ];
+        let groups = group_files(&names, &["1126".into()]);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].version_principals.len(), 2);
+        assert_eq!(count_principals(&names, &["1126".into()]), 1);
+    }
+
+    #[test]
+    fn sin_con_stay_distinct_even_with_versions() {
+        let codes = codes();
+        let names = vec![
+            "1090 - MODELO SIN CAMIONES_v01.sdb".into(),
+            "1090 - MODELO SIN CAMIONES_v02.sdb".into(),
+            "1090 - MODELO CON CAMIONES_v01.sdb".into(),
+        ];
+        let groups = group_files(&names, &codes);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(count_principals(&names, &codes), 2);
     }
 }

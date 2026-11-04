@@ -370,24 +370,31 @@ export function DocumentInspector() {
                   <Button
                     size="sm"
                     variant="secondary"
-                    title="Asociar XLSX/XLS/XLSM de cálculo (copy-on-version)"
+                    title="Asociar una o varias XLSX/XLS/XLSM de cálculo (copy-on-version)"
                     onClick={async () => {
                       try {
                         setVersionError(null);
                         if (!d.current_version_id) return;
                         const picked = await open({
-                          multiple: false,
-                          title: "Asociar planilla calc (XLSX/XLS/XLSM)",
+                          multiple: true,
+                          title: "Asociar planilla(s) calc (XLSX/XLS/XLSM)",
                           filters: [
                             { name: "Excel", extensions: ["xlsx", "xls", "xlsm"] },
                           ],
                         });
-                        if (typeof picked !== "string") return;
-                        await api.associateModelSpreadsheet({
-                          document_version_id: d.current_version_id,
-                          absolute_path: picked,
-                          sheet_kind: "calc",
-                        });
+                        const paths = Array.isArray(picked)
+                          ? picked
+                          : typeof picked === "string"
+                            ? [picked]
+                            : [];
+                        if (paths.length === 0) return;
+                        for (const absolute_path of paths) {
+                          await api.associateModelSpreadsheet({
+                            document_version_id: d.current_version_id,
+                            absolute_path,
+                            sheet_kind: "calc",
+                          });
+                        }
                         await invalidateVersionQueries();
                         await qc.invalidateQueries({
                           queryKey: ["model-sheet-status"],
@@ -402,24 +409,31 @@ export function DocumentInspector() {
                   <Button
                     size="sm"
                     variant="secondary"
-                    title="Asociar XLSX/XLS/XLSM de exportación (version-bound)"
+                    title="Asociar una o varias XLSX/XLS/XLSM de exportación (version-bound)"
                     onClick={async () => {
                       try {
                         setVersionError(null);
                         if (!d.current_version_id) return;
                         const picked = await open({
-                          multiple: false,
-                          title: "Asociar planilla export (XLSX/XLS/XLSM)",
+                          multiple: true,
+                          title: "Asociar planilla(s) export (XLSX/XLS/XLSM)",
                           filters: [
                             { name: "Excel", extensions: ["xlsx", "xls", "xlsm"] },
                           ],
                         });
-                        if (typeof picked !== "string") return;
-                        await api.associateModelSpreadsheet({
-                          document_version_id: d.current_version_id,
-                          absolute_path: picked,
-                          sheet_kind: "export",
-                        });
+                        const paths = Array.isArray(picked)
+                          ? picked
+                          : typeof picked === "string"
+                            ? [picked]
+                            : [];
+                        if (paths.length === 0) return;
+                        for (const absolute_path of paths) {
+                          await api.associateModelSpreadsheet({
+                            document_version_id: d.current_version_id,
+                            absolute_path,
+                            sheet_kind: "export",
+                          });
+                        }
                         await invalidateVersionQueries();
                         await qc.invalidateQueries({
                           queryKey: ["model-sheet-status"],
@@ -580,6 +594,14 @@ export function DocumentInspector() {
             <div className="text-[11px] font-semibold uppercase text-muted">
               Archivos de la versión
             </div>
+            {doc.data?.category_key === "modelos" &&
+              (sheetStatus.data?.calc_file_ids.length ?? 0) > 0 && (
+                <p className="text-[12px] text-muted">
+                  Calc: {sheetStatus.data!.calc_file_ids.length} planilla
+                  {sheetStatus.data!.calc_file_ids.length === 1 ? "" : "s"}
+                  {sheetStatus.data!.has_live_calc ? " (editables)" : " (histórico)"}
+                </p>
+              )}
             {doc.data?.category_key === "modelos" &&
               sheetStatus.data?.export_pending && (
                 <p className="text-[12px] text-muted">

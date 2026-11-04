@@ -1,11 +1,21 @@
-//! Model-associated Excel spreadsheets — Tests A–F.
+//! Model-associated Excel spreadsheets — Tests A–F (baseline) + Tests 1–9 (multi-calc).
 //!
 //! A — Associate calc XLSX to a model version (sheet_kind + policy persisted)
 //! B — Associate export as version-bound
 //! C — create_next_physical_version snapshots calc onto old; originals on new current
 //! D — After next version: exports stay on old; new shows export pending
 //! E — Open historical/snapshot sheet via safe temp copy (snapshot path untouched)
-//! F — Tree lists sheets under versions; refuse non-model / non-spreadsheet / second calc
+//! F — Tree lists sheets; refuse non-model / non-spreadsheet; same path twice; detach
+//!
+//! 1 — Many live calc sheets on one version
+//! 2 — Same absolute/relative path refused on second associate
+//! 3 — ModelSpreadsheetStatus.calc_file_ids lists all calcs
+//! 4 — Per-sheet copy_on_version: all live calcs snapshot + re-link on next version
+//! 5 — Exports remain version_bound; new current export_pending
+//! 6 — Detach one calc; siblings remain available
+//! 7 — Non-spreadsheet / non-modelos still refused
+//! 8 — Tree / list_version_files shows every calc + export
+//! 9 — derived_models multi-copy associates every copied calc (no one-calc lock)
 
 use std::fs;
 use std::path::Path;
@@ -583,8 +593,8 @@ async fn test_f_tree_menus_guards() {
     .await
     .unwrap();
 
-    // Second live calc refused.
-    let err = associate_model_spreadsheet_inner(
+    // Second distinct calc is allowed (multi-calc).
+    let id2 = associate_model_spreadsheet_inner(
         &state,
         AssociateModelSpreadsheetInput {
             document_version_id: ver_id.clone(),
@@ -594,8 +604,25 @@ async fn test_f_tree_menus_guards() {
         },
     )
     .await
+    .unwrap();
+    assert_ne!(id1, id2);
+
+    // Same path twice refused.
+    let err = associate_model_spreadsheet_inner(
+        &state,
+        AssociateModelSpreadsheetInput {
+            document_version_id: ver_id.clone(),
+            absolute_path: calc.display().to_string(),
+            sheet_kind: SHEET_KIND_CALC.into(),
+            version_policy: None,
+        },
+    )
+    .await
     .unwrap_err();
-    assert!(err.to_string().contains("calc"));
+    assert!(
+        err.to_string().to_lowercase().contains("ruta")
+            || err.to_string().to_lowercase().contains("asociada")
+    );
 
     // Non-spreadsheet refused.
     let err = associate_model_spreadsheet_inner(
@@ -627,23 +654,509 @@ async fn test_f_tree_menus_guards() {
     .unwrap_err();
     assert!(err.to_string().contains("Modelos"));
 
-    // Tree listing under version includes sheet with labels.
+    // Tree listing under version includes both sheets with labels.
     let files = list_version_files_inner(&state, &ver_id).await.unwrap();
     assert!(files.iter().any(|f| {
         f.id == id1 && f.sheet_kind.as_deref() == Some(SHEET_KIND_CALC) && f.format_label.as_deref() == Some("CALC")
     }));
+    assert!(files.iter().any(|f| f.id == id2 && f.sheet_kind.as_deref() == Some(SHEET_KIND_CALC)));
 
-    // Detach then allow another calc.
+    // Detach one; the other remains; re-associate the detached path.
     detach_model_spreadsheet_inner(&state, &id1).await.unwrap();
+    let files_after = list_version_files_inner(&state, &ver_id).await.unwrap();
+    assert!(files_after.iter().any(|f| f.id == id2 && f.is_available == 1));
     associate_model_spreadsheet_inner(
         &state,
         AssociateModelSpreadsheetInput {
             document_version_id: ver_id.clone(),
-            absolute_path: calc2.display().to_string(),
+            absolute_path: calc.display().to_string(),
             sheet_kind: SHEET_KIND_CALC.into(),
             version_policy: Some(POLICY_COPY_ON_VERSION.into()),
         },
     )
     .await
     .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Multi-calc Tests 1–8 (Test 9 lives in derived_models_tests)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_1_many_live_calcs_on_one_version() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("root");
+    fs::create_dir_all(&root).unwrap();
+    let db_path = tmp.path().join("t.db");
+    let pool = db::init_pool(&db_path).await.unwrap();
+    let root_id = setup_root(&pool, &root).await;
+    let project_id = seed_project(&pool, &root_id, "P1").await;
+    let sdb = root.join("P1/02_MODELOS/Modelo_v01.sdb");
+    let (_doc_id, ver_id, _) = seed_model_doc(
+        &pool,
+        &project_id,
+        "Modelo",
+        "P1/02_MODELOS/Modelo_v01.sdb",
+        "Modelo_v01.sdb",
+        &sdb,
+    )
+    .await;
+    let state = AppState::new(pool.clone(), db_path);
+    let mut ids = Vec::new();
+    for (name, bytes) in [("A.xlsx", b"A" as &[u8]), ("B.xlsx", b"B"), ("C.xlsm", b"C")] {
+        let p = root.join("P1/02_MODELOS").join(name);
+        write_bytes(&p, bytes);
+        let id = associate_model_spreadsheet_inner(
+            &state,
+            AssociateModelSpreadsheetInput {
+                document_version_id: ver_id.clone(),
+                absolute_path: p.display().to_string(),
+                sheet_kind: SHEET_KIND_CALC.into(),
+                version_policy: None,
+            },
+        )
+        .await
+        .unwrap();
+        ids.push(id);
+    }
+    assert_eq!(ids.len(), 3);
+    let live: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM document_files
+         WHERE document_version_id = ? AND sheet_kind = 'calc' AND is_available = 1
+           AND relative_path NOT LIKE '%.ingmanager/snapshots/%'",
+    )
+    .bind(&ver_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(live.0, 3);
+}
+
+#[tokio::test]
+async fn test_2_same_path_refused() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("root");
+    fs::create_dir_all(&root).unwrap();
+    let db_path = tmp.path().join("t.db");
+    let pool = db::init_pool(&db_path).await.unwrap();
+    let root_id = setup_root(&pool, &root).await;
+    let project_id = seed_project(&pool, &root_id, "P1").await;
+    let sdb = root.join("P1/02_MODELOS/Modelo_v01.sdb");
+    let (_doc_id, ver_id, _) = seed_model_doc(
+        &pool,
+        &project_id,
+        "Modelo",
+        "P1/02_MODELOS/Modelo_v01.sdb",
+        "Modelo_v01.sdb",
+        &sdb,
+    )
+    .await;
+    let calc = root.join("P1/02_MODELOS/Dup.xlsx");
+    write_bytes(&calc, b"DUP");
+    let state = AppState::new(pool.clone(), db_path);
+    associate_model_spreadsheet_inner(
+        &state,
+        AssociateModelSpreadsheetInput {
+            document_version_id: ver_id.clone(),
+            absolute_path: calc.display().to_string(),
+            sheet_kind: SHEET_KIND_CALC.into(),
+            version_policy: None,
+        },
+    )
+    .await
+    .unwrap();
+    let err = associate_model_spreadsheet_inner(
+        &state,
+        AssociateModelSpreadsheetInput {
+            document_version_id: ver_id.clone(),
+            absolute_path: calc.display().to_string(),
+            sheet_kind: SHEET_KIND_CALC.into(),
+            version_policy: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    let msg = err.to_string().to_lowercase();
+    assert!(msg.contains("ruta") || msg.contains("asociada"), "{msg}");
+}
+
+#[tokio::test]
+async fn test_3_status_calc_file_ids() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("root");
+    fs::create_dir_all(&root).unwrap();
+    let db_path = tmp.path().join("t.db");
+    let pool = db::init_pool(&db_path).await.unwrap();
+    let root_id = setup_root(&pool, &root).await;
+    let project_id = seed_project(&pool, &root_id, "P1").await;
+    let sdb = root.join("P1/02_MODELOS/Modelo_v01.sdb");
+    let (doc_id, ver_id, _) = seed_model_doc(
+        &pool,
+        &project_id,
+        "Modelo",
+        "P1/02_MODELOS/Modelo_v01.sdb",
+        "Modelo_v01.sdb",
+        &sdb,
+    )
+    .await;
+    let state = AppState::new(pool.clone(), db_path);
+    let mut expected = Vec::new();
+    for name in ["X1.xlsx", "X2.xlsx"] {
+        let p = root.join("P1/02_MODELOS").join(name);
+        write_bytes(&p, name.as_bytes());
+        expected.push(
+            associate_model_spreadsheet_inner(
+                &state,
+                AssociateModelSpreadsheetInput {
+                    document_version_id: ver_id.clone(),
+                    absolute_path: p.display().to_string(),
+                    sheet_kind: SHEET_KIND_CALC.into(),
+                    version_policy: None,
+                },
+            )
+            .await
+            .unwrap(),
+        );
+    }
+    let status = spreadsheet_status_for_version(&state, &doc_id, &ver_id)
+        .await
+        .unwrap();
+    assert!(status.has_live_calc);
+    assert_eq!(status.calc_file_ids.len(), 2);
+    for id in &expected {
+        assert!(status.calc_file_ids.contains(id));
+    }
+}
+
+#[tokio::test]
+async fn test_4_per_sheet_copy_on_version_all_calcs() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("root");
+    fs::create_dir_all(&root).unwrap();
+    let db_path = tmp.path().join("t.db");
+    let pool = db::init_pool(&db_path).await.unwrap();
+    let root_id = setup_root(&pool, &root).await;
+    let project_id = seed_project(&pool, &root_id, "P1").await;
+    let sdb = root.join("P1/02_MODELOS/Modelo_v01.sdb");
+    let (doc_id, ver1, _) = seed_model_doc(
+        &pool,
+        &project_id,
+        "Modelo",
+        "P1/02_MODELOS/Modelo_v01.sdb",
+        "Modelo_v01.sdb",
+        &sdb,
+    )
+    .await;
+    let state = AppState::new(pool.clone(), db_path.clone());
+    for (name, bytes) in [("Calc1.xlsx", b"ONE" as &[u8]), ("Calc2.xlsx", b"TWO")] {
+        let p = root.join("P1/02_MODELOS").join(name);
+        write_bytes(&p, bytes);
+        associate_model_spreadsheet_inner(
+            &state,
+            AssociateModelSpreadsheetInput {
+                document_version_id: ver1.clone(),
+                absolute_path: p.display().to_string(),
+                sheet_kind: SHEET_KIND_CALC.into(),
+                version_policy: Some(POLICY_COPY_ON_VERSION.into()),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let created = create_next_physical_version_inner(
+        &state,
+        CreateNextPhysicalVersionInput {
+            document_id: doc_id.clone(),
+            notes: Some("v02".into()),
+            source_absolute_path: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let old_live: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM document_files
+         WHERE document_version_id = ? AND sheet_kind = 'calc' AND is_available = 1
+           AND relative_path NOT LIKE '%.ingmanager/snapshots/%'",
+    )
+    .bind(&ver1)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(old_live.0, 0, "working calcs detached from old version");
+
+    let old_snaps: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM document_files
+         WHERE document_version_id = ? AND sheet_kind = 'calc' AND is_available = 1
+           AND relative_path LIKE '%.ingmanager/snapshots/%'",
+    )
+    .bind(&ver1)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(old_snaps.0, 2, "both calcs snapshotted onto old version");
+
+    let new_live: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM document_files
+         WHERE document_version_id = ? AND sheet_kind = 'calc' AND is_available = 1
+           AND relative_path NOT LIKE '%.ingmanager/snapshots/%'",
+    )
+    .bind(&created.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(new_live.0, 2, "both working calcs re-linked to new current");
+
+    let new_status = spreadsheet_status_for_version(&state, &doc_id, &created.id)
+        .await
+        .unwrap();
+    assert!(new_status.has_live_calc);
+    assert_eq!(new_status.calc_file_ids.len(), 2);
+}
+
+#[tokio::test]
+async fn test_5_exports_stay_new_pending() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("root");
+    fs::create_dir_all(&root).unwrap();
+    let db_path = tmp.path().join("t.db");
+    let pool = db::init_pool(&db_path).await.unwrap();
+    let root_id = setup_root(&pool, &root).await;
+    let project_id = seed_project(&pool, &root_id, "P1").await;
+    let sdb = root.join("P1/02_MODELOS/Modelo_v01.sdb");
+    let (doc_id, ver1, _) = seed_model_doc(
+        &pool,
+        &project_id,
+        "Modelo",
+        "P1/02_MODELOS/Modelo_v01.sdb",
+        "Modelo_v01.sdb",
+        &sdb,
+    )
+    .await;
+    let calc = root.join("P1/02_MODELOS/Calc.xlsx");
+    let exp = root.join("P1/02_MODELOS/Export.xlsx");
+    write_bytes(&calc, b"CALC");
+    write_bytes(&exp, b"EXP");
+    let state = AppState::new(pool.clone(), db_path);
+    associate_model_spreadsheet_inner(
+        &state,
+        AssociateModelSpreadsheetInput {
+            document_version_id: ver1.clone(),
+            absolute_path: calc.display().to_string(),
+            sheet_kind: SHEET_KIND_CALC.into(),
+            version_policy: None,
+        },
+    )
+    .await
+    .unwrap();
+    associate_model_spreadsheet_inner(
+        &state,
+        AssociateModelSpreadsheetInput {
+            document_version_id: ver1.clone(),
+            absolute_path: exp.display().to_string(),
+            sheet_kind: SHEET_KIND_EXPORT.into(),
+            version_policy: Some(POLICY_VERSION_BOUND.into()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let created = create_next_physical_version_inner(
+        &state,
+        CreateNextPhysicalVersionInput {
+            document_id: doc_id.clone(),
+            notes: None,
+            source_absolute_path: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let old_exports: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM document_files
+         WHERE document_version_id = ? AND sheet_kind = 'export' AND is_available = 1",
+    )
+    .bind(&ver1)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(old_exports.0, 1);
+
+    let new_status = spreadsheet_status_for_version(&state, &doc_id, &created.id)
+        .await
+        .unwrap();
+    assert!(!new_status.has_export);
+    assert!(new_status.export_pending);
+    assert!(new_status.has_live_calc);
+}
+
+#[tokio::test]
+async fn test_6_detach_one_siblings_remain() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("root");
+    fs::create_dir_all(&root).unwrap();
+    let db_path = tmp.path().join("t.db");
+    let pool = db::init_pool(&db_path).await.unwrap();
+    let root_id = setup_root(&pool, &root).await;
+    let project_id = seed_project(&pool, &root_id, "P1").await;
+    let sdb = root.join("P1/02_MODELOS/Modelo_v01.sdb");
+    let (_doc_id, ver_id, _) = seed_model_doc(
+        &pool,
+        &project_id,
+        "Modelo",
+        "P1/02_MODELOS/Modelo_v01.sdb",
+        "Modelo_v01.sdb",
+        &sdb,
+    )
+    .await;
+    let state = AppState::new(pool.clone(), db_path);
+    let mut ids = Vec::new();
+    for name in ["Keep.xlsx", "Drop.xlsx"] {
+        let p = root.join("P1/02_MODELOS").join(name);
+        write_bytes(&p, name.as_bytes());
+        ids.push(
+            associate_model_spreadsheet_inner(
+                &state,
+                AssociateModelSpreadsheetInput {
+                    document_version_id: ver_id.clone(),
+                    absolute_path: p.display().to_string(),
+                    sheet_kind: SHEET_KIND_CALC.into(),
+                    version_policy: None,
+                },
+            )
+            .await
+            .unwrap(),
+        );
+    }
+    detach_model_spreadsheet_inner(&state, &ids[1]).await.unwrap();
+    let avail: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT id, is_available FROM document_files WHERE id IN (?, ?)",
+    )
+    .bind(&ids[0])
+    .bind(&ids[1])
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let keep = avail.iter().find(|r| r.0 == ids[0]).unwrap();
+    let drop = avail.iter().find(|r| r.0 == ids[1]).unwrap();
+    assert_eq!(keep.1, 1);
+    assert_eq!(drop.1, 0);
+}
+
+#[tokio::test]
+async fn test_7_non_xls_and_non_modelos_refused() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("root");
+    fs::create_dir_all(&root).unwrap();
+    let db_path = tmp.path().join("t.db");
+    let pool = db::init_pool(&db_path).await.unwrap();
+    let root_id = setup_root(&pool, &root).await;
+    let project_id = seed_project(&pool, &root_id, "P1").await;
+    let sdb = root.join("P1/02_MODELOS/Modelo_v01.sdb");
+    let (_doc_id, ver_id, _) = seed_model_doc(
+        &pool,
+        &project_id,
+        "Modelo",
+        "P1/02_MODELOS/Modelo_v01.sdb",
+        "Modelo_v01.sdb",
+        &sdb,
+    )
+    .await;
+    let bad = root.join("P1/02_MODELOS/notes.csv");
+    write_bytes(&bad, b"CSV");
+    let state = AppState::new(pool.clone(), db_path);
+    let err = associate_model_spreadsheet_inner(
+        &state,
+        AssociateModelSpreadsheetInput {
+            document_version_id: ver_id,
+            absolute_path: bad.display().to_string(),
+            sheet_kind: SHEET_KIND_CALC.into(),
+            version_policy: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().to_lowercase().contains("xls"));
+
+    let mem = root.join("P1/04_MEMORIAS/M.docx");
+    let calc = root.join("P1/02_MODELOS/Ok.xlsx");
+    write_bytes(&calc, b"OK");
+    let (_mdoc, mver) = seed_memoria_doc(&pool, &project_id, &mem).await;
+    let err = associate_model_spreadsheet_inner(
+        &state,
+        AssociateModelSpreadsheetInput {
+            document_version_id: mver,
+            absolute_path: calc.display().to_string(),
+            sheet_kind: SHEET_KIND_CALC.into(),
+            version_policy: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("Modelos"));
+}
+
+#[tokio::test]
+async fn test_8_list_shows_all_calcs_and_exports() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("root");
+    fs::create_dir_all(&root).unwrap();
+    let db_path = tmp.path().join("t.db");
+    let pool = db::init_pool(&db_path).await.unwrap();
+    let root_id = setup_root(&pool, &root).await;
+    let project_id = seed_project(&pool, &root_id, "P1").await;
+    let sdb = root.join("P1/02_MODELOS/Modelo_v01.sdb");
+    let (_doc_id, ver_id, _) = seed_model_doc(
+        &pool,
+        &project_id,
+        "Modelo",
+        "P1/02_MODELOS/Modelo_v01.sdb",
+        "Modelo_v01.sdb",
+        &sdb,
+    )
+    .await;
+    let state = AppState::new(pool.clone(), db_path);
+    for name in ["C1.xlsx", "C2.xlsx"] {
+        let p = root.join("P1/02_MODELOS").join(name);
+        write_bytes(&p, name.as_bytes());
+        associate_model_spreadsheet_inner(
+            &state,
+            AssociateModelSpreadsheetInput {
+                document_version_id: ver_id.clone(),
+                absolute_path: p.display().to_string(),
+                sheet_kind: SHEET_KIND_CALC.into(),
+                version_policy: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let exp = root.join("P1/02_MODELOS/E1.xlsx");
+    write_bytes(&exp, b"E");
+    associate_model_spreadsheet_inner(
+        &state,
+        AssociateModelSpreadsheetInput {
+            document_version_id: ver_id.clone(),
+            absolute_path: exp.display().to_string(),
+            sheet_kind: SHEET_KIND_EXPORT.into(),
+            version_policy: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let files = list_version_files_inner(&state, &ver_id).await.unwrap();
+    let calcs: Vec<_> = files
+        .iter()
+        .filter(|f| f.sheet_kind.as_deref() == Some(SHEET_KIND_CALC) && f.is_available == 1)
+        .collect();
+    let exports: Vec<_> = files
+        .iter()
+        .filter(|f| f.sheet_kind.as_deref() == Some(SHEET_KIND_EXPORT) && f.is_available == 1)
+        .collect();
+    assert_eq!(calcs.len(), 2);
+    assert_eq!(exports.len(), 1);
+    assert!(calcs.iter().all(|f| f.format_label.as_deref() == Some("CALC")));
+    assert!(exports.iter().all(|f| f.format_label.as_deref() == Some("EXPORT")));
 }

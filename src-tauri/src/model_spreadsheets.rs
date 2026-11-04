@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::incorporation::link_working_file;
+use crate::path_security::ensure_under_root;
 use crate::project_paths::{self, ProjectLocation};
 use crate::state::AppState;
 
@@ -43,7 +44,8 @@ pub struct ModelSpreadsheetStatus {
     pub has_live_calc: bool,
     pub has_export: bool,
     pub export_pending: bool,
-    pub calc_file_id: Option<String>,
+    /// All available calc associations on this version (live and/or historical snapshots).
+    pub calc_file_ids: Vec<String>,
     pub export_file_ids: Vec<String>,
 }
 
@@ -138,37 +140,41 @@ pub async fn associate_model_spreadsheet_inner(
         ));
     }
 
-    // One live editable calc workbook per version.
-    if kind == SHEET_KIND_CALC {
-        let existing: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM document_files
-             WHERE document_version_id = ?
-               AND sheet_kind = ?
-               AND is_available = 1
-               AND relative_path NOT LIKE '%.ingmanager/snapshots/%'",
-        )
-        .bind(&input.document_version_id)
-        .bind(SHEET_KIND_CALC)
-        .fetch_one(&state.pool)
-        .await?;
-        if existing.0 > 0 {
-            return Err(AppError::msg(
-                "Ya hay una planilla calc editable en esta versión; quite la actual antes de asociar otra",
-            ));
-        }
+    let loc = project_paths::resolve_project_location(&state.pool, &project_id).await?;
+    // Reject the same working path twice on this version (many calcs OK; duplicate path not).
+    let canon = ensure_under_root(&loc.root_path, &path)?;
+    let rel = project_paths::rel_from_project_root(&loc, &canon)?;
+    let dup: Option<(String,)> = sqlx::query_as(
+        "SELECT id FROM document_files
+         WHERE document_version_id = ?
+           AND relative_path = ?
+           AND is_available = 1",
+    )
+    .bind(&input.document_version_id)
+    .bind(&rel)
+    .fetch_optional(&state.pool)
+    .await?;
+    if dup.is_some() {
+        return Err(AppError::msg(
+            "Esta planilla ya está asociada a esta versión (misma ruta)",
+        ));
     }
 
-    let loc = project_paths::resolve_project_location(&state.pool, &project_id).await?;
-    let (file_id, _already) = link_working_file(
+    let (file_id, already) = link_working_file(
         &state.pool,
         &loc,
         &input.document_version_id,
-        &path,
+        &canon,
         Some(label_for_kind(&kind)),
         Some(role_for_kind(&kind)),
         None,
     )
     .await?;
+    if already {
+        return Err(AppError::msg(
+            "Esta planilla ya está asociada a esta versión (misma ruta)",
+        ));
+    }
 
     sqlx::query(
         "UPDATE document_files
@@ -237,18 +243,15 @@ pub async fn spreadsheet_status_for_version(
     .fetch_all(&state.pool)
     .await?;
 
-    let mut calc_file_id = None;
+    let mut calc_file_ids = Vec::new();
     let mut has_live_calc = false;
     let mut export_file_ids = Vec::new();
     for (id, kind, rel) in rows {
         if kind == SHEET_KIND_CALC {
-            let is_snap = rel.contains(".ingmanager/snapshots/");
-            if !is_snap {
+            if !rel.contains(".ingmanager/snapshots/") {
                 has_live_calc = true;
-                calc_file_id = Some(id);
-            } else if calc_file_id.is_none() {
-                calc_file_id = Some(id);
             }
+            calc_file_ids.push(id);
         } else if kind == SHEET_KIND_EXPORT {
             export_file_ids.push(id);
         }
@@ -261,7 +264,7 @@ pub async fn spreadsheet_status_for_version(
         has_live_calc,
         has_export,
         export_pending: is_current && !has_export,
-        calc_file_id,
+        calc_file_ids,
         export_file_ids,
     })
 }

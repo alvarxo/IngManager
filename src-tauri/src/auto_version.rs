@@ -357,6 +357,8 @@ async fn find_stem_candidates(
     base_stem: &str,
     _extension: Option<&str>,
 ) -> AppResult<Vec<(String, String)>> {
+    // Explicit associations only — never match by custom document title.
+    // Priority: file_version_tracking → engineering_groups.group_key → linked file stems.
     let mut from_track: Vec<(String, String)> = sqlx::query_as(
         "SELECT DISTINCT document_id, base_stem FROM file_version_tracking
          WHERE project_id = ? AND base_stem = ?",
@@ -366,8 +368,23 @@ async fn find_stem_candidates(
     .fetch_all(pool)
     .await?;
 
-    let files: Vec<(String, String)> = sqlx::query_as(
-        "SELECT d.id, f.file_name
+    let eg: Vec<(String, String)> = sqlx::query_as(
+        "SELECT document_id, group_key FROM engineering_groups
+         WHERE project_id = ? AND document_id IS NOT NULL AND group_key = ?",
+    )
+    .bind(project_id)
+    .bind(base_stem)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    for (doc_id, gk) in eg {
+        if !from_track.iter().any(|(id, _)| id == &doc_id) {
+            from_track.push((doc_id, gk));
+        }
+    }
+
+    let files: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT d.id, f.file_name, f.engineering_group_key
          FROM documents d
          JOIN document_versions v ON v.id = d.current_version_id
          JOIN document_files f ON f.document_version_id = v.id
@@ -377,20 +394,13 @@ async fn find_stem_candidates(
     .fetch_all(pool)
     .await?;
 
-    for (doc_id, fname) in files {
-        let p = parse_version_filename(&fname);
-        if p.base_stem == base_stem && !from_track.iter().any(|(id, _)| id == &doc_id) {
-            from_track.push((doc_id, p.base_stem));
-        }
-    }
-
-    let titles: Vec<(String, String)> =
-        sqlx::query_as("SELECT id, title FROM documents WHERE project_id = ?")
-            .bind(project_id)
-            .fetch_all(pool)
-            .await?;
-    for (doc_id, title) in titles {
-        if normalize_stem(&title) == base_stem && !from_track.iter().any(|(id, _)| id == &doc_id) {
+    for (doc_id, fname, eg_key) in files {
+        let matches = eg_key
+            .as_deref()
+            .map(|k| k == base_stem)
+            .unwrap_or(false)
+            || parse_version_filename(&fname).base_stem == base_stem;
+        if matches && !from_track.iter().any(|(id, _)| id == &doc_id) {
             from_track.push((doc_id, base_stem.to_string()));
         }
     }

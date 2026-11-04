@@ -17,6 +17,8 @@ mod models_versions_hotfix_tests;
 mod usability_versions_hotfix_tests;
 #[cfg(test)]
 mod memory_revisions_hotfix_tests;
+#[cfg(test)]
+mod model_identity_hotfix_tests;
 mod error;
 #[cfg(test)]
 mod flexibility_tests;
@@ -170,6 +172,8 @@ pub fn run() {
             commands::engineering::list_engineering_groups,
             commands::engineering::list_category_files_filtered,
             commands::engineering::bulk_register_engineering_docs,
+            commands::engineering::sync_model_versions,
+            commands::engineering::associate_model_version,
             commands::inbox_cmd::inbox_ensure_dir,
             commands::inbox_cmd::inbox_list,
             commands::inbox_cmd::inbox_stage_files,

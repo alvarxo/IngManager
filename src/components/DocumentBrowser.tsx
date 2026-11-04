@@ -190,9 +190,31 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
     onSuccess: async (r) => {
       await qc.invalidateQueries({ queryKey: ["documents", projectId, categoryKey] });
       await qc.invalidateQueries({ queryKey: ["categories", projectId] });
+      await qc.invalidateQueries({ queryKey: ["doc-versions"] });
+      await qc.invalidateQueries({ queryKey: ["document"] });
       setError(null);
       window.alert(
-        `Registrados ${r.created} modelos (sin copiar). Omitidos: ${r.skipped}.`,
+        `Registrados ${r.created} modelos (sin copiar). Versiones añadidas a existentes: ${r.versions_added}. Omitidos: ${r.skipped}.`,
+      );
+    },
+    onError: (e: Error) => setError(String(e)),
+  });
+
+  const syncVersionsMut = useMutation({
+    mutationFn: () =>
+      api.syncModelVersions({
+        project_id: projectId,
+        category_key: categoryKey,
+        document_id: selectedDocumentId,
+      }),
+    onSuccess: async (r) => {
+      await qc.invalidateQueries({ queryKey: ["documents", projectId, categoryKey] });
+      await qc.invalidateQueries({ queryKey: ["doc-versions"] });
+      await qc.invalidateQueries({ queryKey: ["document"] });
+      await qc.invalidateQueries({ queryKey: ["doc-version-files"] });
+      setError(null);
+      window.alert(
+        `Sincronización: ${r.versions_added} versión(es) añadidas en ${r.documents_touched} documento(s). Ya vinculadas: ${r.already_linked}.`,
       );
     },
     onError: (e: Error) => setError(String(e)),
@@ -378,9 +400,18 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
               variant="secondary"
               disabled={bulkReg.isPending}
               onClick={() => bulkReg.mutate()}
-              title="Registrar documentos lógicos desde .sdb principales sin copiar archivos"
+              title="Registrar o sincronizar modelos (.sdb): crea documentos nuevos y añade versiones faltantes a los ya registrados (sin copiar)"
             >
-              <FilePlus2 size={14} /> Registrar modelos…
+              <FilePlus2 size={14} /> Registrar / sincronizar…
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={syncVersionsMut.isPending || !selectedDocumentId}
+              onClick={() => syncVersionsMut.mutate()}
+              title="Sincronizar versiones físicas faltantes del documento seleccionado (p.ej. v01–v03 → 1126-MOD-001)"
+            >
+              Sync versiones
             </Button>
             <Button
               size="sm"

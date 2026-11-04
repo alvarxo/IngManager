@@ -755,7 +755,27 @@ export interface BulkRegisterInput {
 export interface BulkRegisterResult {
   created: number;
   skipped: number;
+  versions_added: number;
   document_ids: string[];
+}
+
+export interface SyncModelVersionsInput {
+  project_id: string;
+  category_key?: string | null;
+  document_id?: string | null;
+}
+
+export interface SyncModelVersionsResult {
+  documents_touched: number;
+  versions_added: number;
+  already_linked: number;
+  document_ids: string[];
+}
+
+export interface AssociateModelVersionInput {
+  document_id: string;
+  absolute_path: string;
+  notes?: string | null;
 }
 
 export interface UpdatePlanItemInput {

@@ -630,6 +630,8 @@ pub async fn update_document(
     let received_at = input.received_at.or(existing.received_at);
     let notes = input.notes.or(existing.notes);
 
+    // Title is display-only: never touch business_code, engineering group_key,
+    // document_files paths, or version links when editing metadata.
     sqlx::query(
         "UPDATE documents SET
             title = ?, status = ?, subcategory = ?, origin = ?, received_at = ?,

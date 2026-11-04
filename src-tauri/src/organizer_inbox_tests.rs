@@ -318,7 +318,8 @@ async fn g_overwrite_no_false_version() {
     assert_eq!(max.0, 1);
 }
 
-/// H — Ambiguous stem → pending
+/// H — Ambiguous stem via two explicit associations → pending
+/// (titles alone must NOT create candidates — identity is independent of title).
 #[tokio::test]
 async fn h_ambiguous_goes_pending() {
     let dir = tempdir().unwrap();
@@ -327,44 +328,13 @@ async fn h_ambiguous_goes_pending() {
     let modelos = dir.path().join("PA2/02_MODELOS");
     fs::create_dir_all(&modelos).unwrap();
 
-    let a = modelos.join("Shared.sdb");
-    let b = modelos.join("Shared_backup.sdb");
+    let a = modelos.join("Shared_v01.sdb");
+    let b = modelos.join("Shared_v02.sdb");
     fs::write(&a, b"a").unwrap();
     fs::write(&b, b"b").unwrap();
-    // Two docs with same stem via title
-    let _ = seed_document_with_file(&pool, &pid, "Shared", &a, dir.path()).await;
-    // Second document also titled Shared (ambiguous)
-    let cat: (String,) =
-        sqlx::query_as("SELECT id FROM categories WHERE project_id = ? AND key = 'modelos'")
-            .bind(&pid)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    let doc2 = uuid::Uuid::new_v4().to_string();
-    let ver2 = uuid::Uuid::new_v4().to_string();
-    sqlx::query(
-        "INSERT INTO documents (id, project_id, category_id, title, current_version_id, status, created_at, updated_at)
-         VALUES (?, ?, ?, 'Shared', ?, 'draft', datetime('now'), datetime('now'))",
-    )
-    .bind(&doc2)
-    .bind(&pid)
-    .bind(&cat.0)
-    .bind(&ver2)
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO document_versions (id, document_id, version_number, label, created_at, is_snapshot)
-         VALUES (?, ?, 1, 'v01', datetime('now'), 0)",
-    )
-    .bind(&ver2)
-    .bind(&doc2)
-    .execute(&pool)
-    .await
-    .unwrap();
-    auto_version::register_baseline(&pool, &pid, &doc2, Some(&ver2), &b)
-        .await
-        .unwrap();
+    // Two docs each explicitly linked to a Shared_* principal (same technical family).
+    let _ = seed_document_with_file(&pool, &pid, "Doc A custom title", &a, dir.path()).await;
+    let _ = seed_document_with_file(&pool, &pid, "Doc B other title", &b, dir.path()).await;
 
     let neu = modelos.join("Shared_v03.sdb");
     fs::write(&neu, b"new").unwrap();

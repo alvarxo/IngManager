@@ -386,7 +386,7 @@ export function DocumentInspector() {
                 size="sm"
                 variant="secondary"
                 disabled={versionBusy}
-                title="Vincular un archivo ya existente como nueva versión (sin copiar)"
+                title="Vincular un archivo ya existente como nueva versión (sin copiar). En Modelos usa asociación explícita por familia técnica, no por título."
                 onClick={async () => {
                   try {
                     setVersionBusy(true);
@@ -394,15 +394,23 @@ export function DocumentInspector() {
                     const picked = await open({
                       multiple: false,
                       title:
-                        "Registrar archivo existente como nueva versión (sin copiar). Cancelar = no crear.",
+                        "Asociar archivo existente como nueva versión (sin copiar). Cancelar = no crear.",
                     });
                     if (typeof picked !== "string") return;
-                    await api.createDocumentVersion({
-                      document_id: d.id,
-                      source_absolute_path: picked,
-                      from_current: false,
-                      notes: "Versión vinculada a archivo existente",
-                    });
+                    if (d.category_key === "modelos") {
+                      await api.associateModelVersion({
+                        document_id: d.id,
+                        absolute_path: picked,
+                        notes: "Versión asociada manualmente",
+                      });
+                    } else {
+                      await api.createDocumentVersion({
+                        document_id: d.id,
+                        source_absolute_path: picked,
+                        from_current: false,
+                        notes: "Versión vinculada a archivo existente",
+                      });
+                    }
                     await invalidateVersionQueries();
                     setInspectorTab("doc-versions");
                   } catch (e) {
@@ -412,7 +420,9 @@ export function DocumentInspector() {
                   }
                 }}
               >
-                Registrar archivo existente
+                {d.category_key === "modelos"
+                  ? "Asociar como versión"
+                  : "Registrar archivo existente"}
               </Button>
               <Button
                 size="sm"

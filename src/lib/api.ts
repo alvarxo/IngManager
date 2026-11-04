@@ -56,6 +56,9 @@ import type {
   EngineeringGroupDto,
   BulkRegisterInput,
   BulkRegisterResult,
+  SyncModelVersionsInput,
+  SyncModelVersionsResult,
+  AssociateModelVersionInput,
   AvailabilityCleanupResult,
   DocumentOpenFormats,
   LogicalTreeExpandPolicy,
@@ -515,6 +518,10 @@ export const api = {
     }),
   bulkRegisterEngineeringDocs: (input: BulkRegisterInput) =>
     invoke<BulkRegisterResult>("bulk_register_engineering_docs", { input }),
+  syncModelVersions: (input: SyncModelVersionsInput) =>
+    invoke<SyncModelVersionsResult>("sync_model_versions", { input }),
+  associateModelVersion: (input: AssociateModelVersionInput) =>
+    invoke<DocumentVersionRow>("associate_model_version", { input }),
 
   inboxEnsureDir: () => invoke<string>("inbox_ensure_dir"),
   inboxList: () => invoke<InboxItem[]>("inbox_list"),

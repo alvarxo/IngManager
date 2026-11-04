@@ -32,6 +32,7 @@ import type {
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui-store";
 import { Button } from "./ui/button";
+import { CreateDerivedModelDialog } from "./CreateDerivedModelDialog";
 import { RepairModelHistoryDialog } from "./RepairModelHistoryDialog";
 import { UnifyModelsDialog } from "./UnifyModelsDialog";
 
@@ -82,6 +83,7 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
   const [ctxMenu, setCtxMenu] = useState<DocContextMenu | null>(null);
   const [unifyOpen, setUnifyOpen] = useState(false);
   const [unifySuggestedDups, setUnifySuggestedDups] = useState<string[]>([]);
+  const [derivedSource, setDerivedSource] = useState<DocumentRow | null>(null);
   const [repairHistoryOpen, setRepairHistoryOpen] = useState(false);
   const [formatPicker, setFormatPicker] = useState<FormatPickerState | null>(
     null,
@@ -490,6 +492,20 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
             <Button
               size="sm"
               variant="secondary"
+              disabled={!selectedDocumentId}
+              onClick={() => {
+                const doc = (docs.data ?? []).find(
+                  (d) => d.id === selectedDocumentId,
+                );
+                if (doc) setDerivedSource(doc);
+              }}
+              title="Copiar el .sdb actual como nuevo modelo (UUID + MOD nuevos); opcionalmente copia planillas calc a paths nuevos; provenance deriva_de"
+            >
+              Crear derivado…
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
               onClick={() => {
                 setUnifySuggestedDups([]);
                 setUnifyOpen(true);
@@ -728,6 +744,18 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
                   onClick={() => {
                     const d = (ctxMenu.target as { kind: "doc"; doc: DocumentRow })
                       .doc;
+                    setCtxMenu(null);
+                    setDerivedSource(d);
+                  }}
+                >
+                  Crear modelo derivado…
+                </button>
+                <button
+                  type="button"
+                  className="block w-full px-3 py-1.5 text-left text-[12.5px] hover:bg-elevated"
+                  onClick={() => {
+                    const d = (ctxMenu.target as { kind: "doc"; doc: DocumentRow })
+                      .doc;
                     setSelectedDocumentId(d.id);
                     setUnifySuggestedDups([]);
                     setCtxMenu(null);
@@ -959,6 +987,24 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
             </div>
           </div>
         </div>
+      )}
+
+      {derivedSource && categoryKey === "modelos" && (
+        <CreateDerivedModelDialog
+          sourceDocument={derivedSource}
+          onClose={() => setDerivedSource(null)}
+          onCompleted={async (message) => {
+            setDerivedSource(null);
+            await qc.invalidateQueries({
+              queryKey: ["documents", projectId, categoryKey],
+            });
+            await qc.invalidateQueries({ queryKey: ["doc-versions"] });
+            await qc.invalidateQueries({ queryKey: ["document"] });
+            await qc.invalidateQueries({ queryKey: ["doc-version-files"] });
+            await qc.invalidateQueries({ queryKey: ["categories", projectId] });
+            window.alert(message);
+          }}
+        />
       )}
 
       {unifyOpen && categoryKey === "modelos" && (

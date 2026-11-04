@@ -12,7 +12,10 @@ import type {
   CreateRevisionInput,
   CreateSentTransmissionInput,
   CreateNextPhysicalVersionInput,
+  CreateDerivedModelInput,
+  CreateDerivedModelResult,
   CreateVersionInput,
+  DerivedModelPreview,
   DocumentFileRow,
   NextPhysicalVersionPreview,
   RepairVersionFileInput,
@@ -281,6 +284,18 @@ export const api = {
     }),
   createNextPhysicalVersion: (input: CreateNextPhysicalVersionInput) =>
     invoke<DocumentVersionRow>("create_next_physical_version", { input }),
+  previewCreateDerivedModel: (
+    sourceDocumentId: string,
+    title?: string | null,
+    copyCalcSheets?: boolean | null,
+  ) =>
+    invoke<DerivedModelPreview>("preview_create_derived_model", {
+      sourceDocumentId,
+      title: title ?? null,
+      copyCalcSheets: copyCalcSheets ?? null,
+    }),
+  createDerivedModel: (input: CreateDerivedModelInput) =>
+    invoke<CreateDerivedModelResult>("create_derived_model", { input }),
   repairVersionFile: (input: RepairVersionFileInput) =>
     invoke<DocumentFileRow>("repair_version_file", { input }),
   restoreDocumentVersion: (

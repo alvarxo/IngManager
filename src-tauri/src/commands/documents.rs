@@ -266,6 +266,10 @@ fn validate_doc_status(category_key: &str, status: &str) -> AppResult<()> {
     Ok(())
 }
 
+pub(crate) async fn fetch_document_public(state: &AppState, id: &str) -> AppResult<DocumentRow> {
+    fetch_document(state, id).await
+}
+
 async fn fetch_document(state: &AppState, id: &str) -> AppResult<DocumentRow> {
     sqlx::query_as::<_, DocumentRow>(
         "SELECT
@@ -2778,4 +2782,28 @@ pub async fn model_spreadsheet_status(
 ) -> AppResult<crate::model_spreadsheets::ModelSpreadsheetStatus> {
     crate::model_spreadsheets::spreadsheet_status_for_version(&state, &document_id, &version_id)
         .await
+}
+
+#[tauri::command]
+pub async fn preview_create_derived_model(
+    state: State<'_, AppState>,
+    source_document_id: String,
+    title: Option<String>,
+    copy_calc_sheets: Option<bool>,
+) -> AppResult<crate::derived_models::DerivedModelPreview> {
+    crate::derived_models::preview_create_derived_model(
+        &state,
+        &source_document_id,
+        title.as_deref(),
+        copy_calc_sheets.unwrap_or(false),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn create_derived_model(
+    state: State<'_, AppState>,
+    input: crate::derived_models::CreateDerivedModelInput,
+) -> AppResult<crate::derived_models::CreateDerivedModelResult> {
+    crate::derived_models::create_derived_model_inner(&state, input).await
 }

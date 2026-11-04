@@ -287,6 +287,29 @@ pub async fn apply_unify_models(
     crate::unify_models::apply_unify_models_inner(&state.pool, &state.db_path, input).await
 }
 
+/// Preview «Reparar historial»: drop false aux/.sbk versions; keep `.sdb` only.
+#[tauri::command]
+pub async fn preview_repair_model_history(
+    state: State<'_, AppState>,
+    input: crate::repair_model_history::RepairModelHistoryInput,
+) -> AppResult<crate::repair_model_history::RepairModelHistoryPreview> {
+    crate::repair_model_history::preview_repair_model_history_inner(&state.pool, input).await
+}
+
+/// Apply historial repair with SQLite backup; never deletes physical files.
+#[tauri::command]
+pub async fn apply_repair_model_history(
+    state: State<'_, AppState>,
+    input: crate::repair_model_history::RepairModelHistoryInput,
+) -> AppResult<crate::repair_model_history::RepairModelHistoryResult> {
+    crate::repair_model_history::apply_repair_model_history_inner(
+        &state.pool,
+        &state.db_path,
+        input,
+    )
+    .await
+}
+
 type ResolvedPrincipal = (ClassifiedFile, String, String);
 
 fn resolve_principals_on_disk(

@@ -42,6 +42,9 @@ mod models;
 mod unify_models;
 #[cfg(test)]
 mod unify_models_tests;
+mod repair_model_history;
+#[cfg(test)]
+mod sap_false_versions_hotfix_tests;
 #[cfg(test)]
 mod organizer_inbox_tests;
 mod organizer;
@@ -189,6 +192,8 @@ pub fn run() {
             commands::engineering::list_unify_model_suggestions,
             commands::engineering::preview_unify_models,
             commands::engineering::apply_unify_models,
+            commands::engineering::preview_repair_model_history,
+            commands::engineering::apply_repair_model_history,
             commands::inbox_cmd::inbox_ensure_dir,
             commands::inbox_cmd::inbox_list,
             commands::inbox_cmd::inbox_stage_files,

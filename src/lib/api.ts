@@ -64,6 +64,9 @@ import type {
   UnifyModelsInput,
   UnifyModelsPreview,
   UnifyModelsResult,
+  RepairModelHistoryInput,
+  RepairModelHistoryPreview,
+  RepairModelHistoryResult,
   AvailabilityCleanupResult,
   DocumentOpenFormats,
   LogicalTreeExpandPolicy,
@@ -551,6 +554,12 @@ export const api = {
     invoke<UnifyModelsPreview>("preview_unify_models", { input }),
   applyUnifyModels: (input: UnifyModelsInput) =>
     invoke<UnifyModelsResult>("apply_unify_models", { input }),
+  previewRepairModelHistory: (input: RepairModelHistoryInput) =>
+    invoke<RepairModelHistoryPreview>("preview_repair_model_history", {
+      input,
+    }),
+  applyRepairModelHistory: (input: RepairModelHistoryInput) =>
+    invoke<RepairModelHistoryResult>("apply_repair_model_history", { input }),
 
   inboxEnsureDir: () => invoke<string>("inbox_ensure_dir"),
   inboxList: () => invoke<InboxItem[]>("inbox_list"),

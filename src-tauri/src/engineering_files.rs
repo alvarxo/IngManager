@@ -41,10 +41,49 @@ impl FileRole {
 const SAP_PRINCIPAL_EXTS: &[&str] = &["sdb"];
 
 /// Companion / scratch / export extensions typically paired with a `.sdb`.
+/// Includes `.sbk` (SAP2000 backup) — never a model version principal.
 const SAP_AUX_EXTS: &[&str] = &[
-    "s2k", "$2k", "log", "out", "txt", "xml", "rtf", "mdb", "sdbr", "ebk", "sfk", "$sf", "avi",
-    "gif", "bmp", "jpg", "jpeg", "png", "xls", "xlsx", "csv",
+    "sbk", "s2k", "$2k", "log", "out", "txt", "xml", "rtf", "mdb", "sdbr", "ebk", "sfk", "$sf",
+    "avi", "gif", "bmp", "jpg", "jpeg", "png", "xls", "xlsx", "csv",
 ];
+
+/// True when `ext` is a SAP2000/CSI model principal (`.sdb` only).
+pub fn is_sap_principal_extension(ext: &str) -> bool {
+    let e = ext.trim_start_matches('.').to_ascii_lowercase();
+    SAP_PRINCIPAL_EXTS.iter().any(|x| *x == e.as_str())
+}
+
+/// True when `ext` is a SAP companion/aux (incl. `.sbk`) — never creates model versions.
+pub fn is_sap_auxiliary_extension(ext: &str) -> bool {
+    let e = ext.trim_start_matches('.').to_ascii_lowercase();
+    SAP_AUX_EXTS.iter().any(|x| *x == e.as_str())
+}
+
+/// Extensions that may create auto-versions. SAP aux / `.sbk` always false.
+/// Model versions require `.sdb`; other principals (docx/dwg/rvt/…) remain eligible.
+pub fn can_auto_version_extension(ext: Option<&str>) -> bool {
+    let Some(raw) = ext.map(|e| e.trim_start_matches('.').to_ascii_lowercase()) else {
+        return false;
+    };
+    if is_sap_auxiliary_extension(&raw) || OTHER_AUX_EXTS.iter().any(|a| *a == raw.as_str()) {
+        return false;
+    }
+    if is_sap_principal_extension(&raw) {
+        return true;
+    }
+    matches!(
+        raw.as_str(),
+        "docx"
+            | "doc"
+            | "dwg"
+            | "dxf"
+            | "rvt"
+            | "rfa"
+            | "pdf"
+            | "idea"
+            | "ideastatica"
+    ) || OTHER_PRINCIPAL_EXTS.iter().any(|a| *a == raw.as_str())
+}
 
 /// Other CAD/BIM principals (standalone unless companions share stem).
 const OTHER_PRINCIPAL_EXTS: &[&str] = &["rvt", "rfa", "dwg", "dxf", "idea", "ideastatica"];

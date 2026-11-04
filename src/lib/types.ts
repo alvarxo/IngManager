@@ -867,6 +867,51 @@ export interface UnifyModelsResult {
   group_key: string | null;
 }
 
+export interface RepairModelHistoryInput {
+  project_id: string;
+  document_id?: string | null;
+}
+
+export interface RepairVersionDecision {
+  version_id: string;
+  version_number: number;
+  label: string | null;
+  keep: boolean;
+  reason: string;
+  principal_file_name: string | null;
+  principal_extension: string | null;
+  relative_path: string | null;
+  new_version_number: number | null;
+}
+
+export interface RepairModelHistoryDocPreview {
+  document_id: string;
+  business_code: string | null;
+  title: string;
+  versions_before: number;
+  versions_after: number;
+  decisions: RepairVersionDecision[];
+  new_current_version_id: string | null;
+}
+
+export interface RepairModelHistoryPreview {
+  project_id: string;
+  documents: RepairModelHistoryDocPreview[];
+  total_versions_before: number;
+  total_versions_after: number;
+  versions_to_drop: number;
+  warnings: string[];
+}
+
+export interface RepairModelHistoryResult {
+  project_id: string;
+  documents_repaired: number;
+  versions_kept: number;
+  versions_removed: number;
+  db_backup_path: string;
+  documents: RepairModelHistoryDocPreview[];
+}
+
 export interface UpdatePlanItemInput {
   item_id: string;
   action?: string | null;

@@ -175,3 +175,12 @@ pub async fn remove_authorized_root(
 ) -> AppResult<()> {
     project_paths::remove_authorized_root(&state.pool, &root_id).await
 }
+
+#[tauri::command]
+pub async fn update_authorized_root_label(
+    state: State<'_, AppState>,
+    root_id: String,
+    label: String,
+) -> AppResult<AuthorizedRoot> {
+    project_paths::update_authorized_root_label(&state.pool, &root_id, &label).await
+}

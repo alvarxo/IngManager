@@ -115,6 +115,105 @@ async fn multi_authorized_roots_and_link_in_place() {
     assert_eq!(found.2, "ExistingProj");
 }
 
+/// Part B Tests A–C: update label; path/primary unchanged; list reflects label.
+#[tokio::test]
+async fn test_b_a_c_update_authorized_root_label() {
+    let dir = tempdir().unwrap();
+    let pool = pool_in(dir.path()).await;
+    let primary = dir.path().join("primary");
+    let secondary = dir.path().join("secondary");
+    fs::create_dir_all(&primary).unwrap();
+    fs::create_dir_all(&secondary).unwrap();
+    let prim = upsert_primary_root(&pool, &primary).await.unwrap();
+    let sec = project_paths::add_authorized_root(&pool, &secondary, Some("Extra"), false)
+        .await
+        .unwrap();
+    let path_before = sec.absolute_path.clone();
+
+    let updated = project_paths::update_authorized_root_label(&pool, &sec.id, "  Oficina Norte  ")
+        .await
+        .unwrap();
+    assert_eq!(updated.label.as_deref(), Some("Oficina Norte"));
+    assert_eq!(updated.absolute_path, path_before);
+    assert_eq!(updated.is_primary, 0);
+
+    let listed = project_paths::list_authorized_roots(&pool).await.unwrap();
+    let listed_sec = listed.iter().find(|r| r.id == sec.id).unwrap();
+    assert_eq!(listed_sec.label.as_deref(), Some("Oficina Norte"));
+    assert_eq!(listed_sec.absolute_path, path_before);
+
+    // Primary still primary; path untouched on disk
+    assert!(primary.is_dir());
+    assert!(secondary.is_dir());
+    let listed_prim = listed.iter().find(|r| r.id == prim.id).unwrap();
+    assert_eq!(listed_prim.is_primary, 1);
+}
+
+/// Part B Tests D–E: empty label rejected; unknown id errors.
+#[tokio::test]
+async fn test_b_d_e_label_guards() {
+    let dir = tempdir().unwrap();
+    let pool = pool_in(dir.path()).await;
+    let primary = dir.path().join("primary");
+    fs::create_dir_all(&primary).unwrap();
+    let prim = upsert_primary_root(&pool, &primary).await.unwrap();
+
+    let empty = project_paths::update_authorized_root_label(&pool, &prim.id, "   ")
+        .await
+        .unwrap_err();
+    assert!(
+        empty.to_string().to_lowercase().contains("vacía")
+            || empty.to_string().to_lowercase().contains("vacia"),
+        "expected empty-label error, got {empty}"
+    );
+
+    let missing = project_paths::update_authorized_root_label(&pool, "no-such-root", "X")
+        .await
+        .unwrap_err();
+    assert!(
+        missing.to_string().to_lowercase().contains("no encontrada")
+            || missing.to_string().to_lowercase().contains("encontrad"),
+        "expected unknown-root error, got {missing}"
+    );
+}
+
+/// Part B Tests F–G: app_settings filter key round-trip; no FS move after label update.
+#[tokio::test]
+async fn test_b_f_g_filter_persist_and_no_path_move() {
+    let dir = tempdir().unwrap();
+    let pool = pool_in(dir.path()).await;
+    let primary = dir.path().join("primary");
+    fs::create_dir_all(&primary).unwrap();
+    let prim = upsert_primary_root(&pool, &primary).await.unwrap();
+    let path_before = std::fs::canonicalize(&primary).unwrap();
+
+    db::set_setting(&pool, "project_list_root_filter", &prim.id)
+        .await
+        .unwrap();
+    let got = db::get_setting(&pool, "project_list_root_filter")
+        .await
+        .unwrap();
+    assert_eq!(got.as_deref(), Some(prim.id.as_str()));
+
+    db::set_setting(&pool, "project_list_root_filter", "")
+        .await
+        .unwrap();
+    let cleared = db::get_setting(&pool, "project_list_root_filter")
+        .await
+        .unwrap();
+    assert_eq!(cleared.as_deref(), Some(""));
+
+    let _ = project_paths::update_authorized_root_label(&pool, &prim.id, "Principal renombrada")
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::canonicalize(&primary).unwrap(),
+        path_before,
+        "label update must not move the root folder"
+    );
+    assert!(path_before.is_dir());
+}
+
 #[test]
 fn smart_category_mapping_aliases() {
     assert_eq!(map_folder_name_to_key("Modelos"), Some("modelos"));

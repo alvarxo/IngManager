@@ -81,6 +81,7 @@ pub fn run() {
             commands::settings::list_authorized_roots,
             commands::settings::add_authorized_root,
             commands::settings::remove_authorized_root,
+            commands::settings::update_authorized_root_label,
             commands::projects::get_project_absolute_path,
             commands::projects::preview_next_project_code,
             commands::projects::list_projects,

@@ -100,6 +100,8 @@ export const api = {
     }),
   removeAuthorizedRoot: (rootId: string) =>
     invoke<void>("remove_authorized_root", { rootId }),
+  updateAuthorizedRootLabel: (rootId: string, label: string) =>
+    invoke<AuthorizedRoot>("update_authorized_root_label", { rootId, label }),
 
   previewNextProjectCode: () => invoke<string>("preview_next_project_code"),
   listProjects: (includeArchived = false) =>

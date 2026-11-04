@@ -172,6 +172,14 @@ export interface TrashItem {
   is_directory: number | null;
 }
 
+export type ModelType =
+  | "sap2000"
+  | "revit"
+  | "idea_statica"
+  | "robot"
+  | "etabs"
+  | "other";
+
 export interface DocumentRow {
   id: string;
   project_id: string;
@@ -179,6 +187,8 @@ export interface DocumentRow {
   business_code: string | null;
   title: string;
   doc_type: string | null;
+  /** Modelos software subtype: sap2000|revit|idea_statica|robot|etabs|other */
+  model_type: string | null;
   current_version_id: string | null;
   status: string;
   subcategory: string | null;
@@ -208,6 +218,7 @@ export interface CreateDocumentInput {
   notes?: string | null;
   assign_code?: boolean | null;
   source_absolute_path?: string | null;
+  model_type?: string | null;
 }
 
 export interface UpdateDocumentInput {
@@ -441,6 +452,7 @@ export interface DerivedModelPreview {
   source_sdb_absolute_path: string;
   proposed_title: string;
   proposed_business_code: string;
+  proposed_model_type: string;
   destination_sdb_absolute_path: string;
   destination_sdb_file_name: string;
   proposed_group_key: string;

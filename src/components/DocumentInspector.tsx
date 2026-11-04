@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Star } from "lucide-react";
 import { api } from "@/lib/api";
+import { modelTypeLabel, modelTypePrefix } from "@/lib/model-types";
 import { formatBytes } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui-store";
 import { Button } from "./ui/button";
@@ -126,6 +127,15 @@ export function DocumentInspector() {
     onError: (e: Error) => setMetaError(String(e)),
   });
 
+  const updateCodeMut = useMutation({
+    mutationFn: () => api.updateDocumentCodeFromModelType(documentId!),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["document", documentId] });
+      await qc.invalidateQueries({ queryKey: ["documents"] });
+    },
+    onError: (e: Error) => setMetaError(String(e)),
+  });
+
   async function invalidateVersionQueries() {
     await qc.invalidateQueries({ queryKey: ["document", documentId] });
     await qc.invalidateQueries({ queryKey: ["documents"] });
@@ -234,27 +244,55 @@ export function DocumentInspector() {
                   </div>
                 )}
                 <Meta label="Tipo" value={d.doc_type ?? "—"} />
+                {d.category_key === "modelos" && (
+                  <Meta
+                    label="Subtipo modelo"
+                    value={`${modelTypeLabel(d.model_type)} (${modelTypePrefix(d.model_type)})`}
+                  />
+                )}
                 <Meta label="Estado" value={d.status} />
                 <Meta label="Versión actual" value={d.current_version_label ?? "—"} />
                 <Meta label="Subcategoría" value={d.subcategory ?? "—"} />
                 <Meta label="Origen" value={d.origin ?? "—"} />
                 <Meta label="Recepción" value={d.received_at ?? "—"} />
                 <Meta label="Notas" value={d.notes ?? "—"} />
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  onClick={() => {
-                    setEditTitle(d.title);
-                    setEditSubcategory(d.subcategory ?? "");
-                    setEditOrigin(d.origin ?? "");
-                    setEditReceivedAt(d.received_at ?? "");
-                    setEditNotes(d.notes ?? "");
-                    setMetaError(null);
-                    setEditingMeta(true);
-                  }}
-                >
-                  Editar metadatos…
-                </Button>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => {
+                      setEditTitle(d.title);
+                      setEditSubcategory(d.subcategory ?? "");
+                      setEditOrigin(d.origin ?? "");
+                      setEditReceivedAt(d.received_at ?? "");
+                      setEditNotes(d.notes ?? "");
+                      setMetaError(null);
+                      setEditingMeta(true);
+                    }}
+                  >
+                    Editar metadatos…
+                  </Button>
+                  {d.category_key === "modelos" && (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      title="Asigna el siguiente correlativo del prefijo del subtipo (SAP/RVT/IDE/ROB/ETB/MOD). Conserva códigos previos en la secuencia."
+                      disabled={updateCodeMut.isPending}
+                      onClick={() => {
+                        if (
+                          !window.confirm(
+                            `¿Actualizar código según tipo «${modelTypeLabel(d.model_type)}»?\nSe asignará el siguiente correlativo ${modelTypePrefix(d.model_type)}.`,
+                          )
+                        ) {
+                          return;
+                        }
+                        updateCodeMut.mutate();
+                      }}
+                    >
+                      Actualizar código según tipo
+                    </Button>
+                  )}
+                </div>
               </>
             ) : (
               <div className="space-y-2">

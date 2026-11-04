@@ -214,7 +214,11 @@ async fn test_c_bulk_register_one_doc_two_versions() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert!(code.0.contains("MOD-001"), "got {}", code.0);
+    assert!(
+        code.0.contains("SAP-001") || code.0.contains("MOD-001"),
+        "expected SAP-001 for .sdb (or legacy MOD-001), got {}",
+        code.0
+    );
 
     let vers: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM document_versions v

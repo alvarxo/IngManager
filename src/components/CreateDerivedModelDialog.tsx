@@ -77,7 +77,7 @@ export function CreateDerivedModelDialog({
           <h2 className="text-[14px] font-semibold">Crear modelo derivado</h2>
           <p className="mt-1 text-[12px] text-muted">
             Copia el .sdb actual a un archivo nuevo (stem distinto), asigna UUID
-            y código MOD nuevos, y registra provenance{" "}
+            y código según el subtipo del origen, y registra provenance{" "}
             <span className="font-mono">deriva_de</span>. No fusiona con el
             origen ni promociona planillas.
           </p>
@@ -118,6 +118,9 @@ export function CreateDerivedModelDialog({
                 Código propuesto:{" "}
                 <span className="font-mono font-semibold">
                   {preview.proposed_business_code}
+                </span>{" "}
+                <span className="text-muted">
+                  ({preview.proposed_model_type})
                 </span>
               </div>
               <div>

@@ -38,6 +38,9 @@ mod logical_tree_nav_tests;
 mod model_spreadsheets;
 #[cfg(test)]
 mod model_spreadsheets_tests;
+mod model_types;
+#[cfg(test)]
+mod model_subtypes_codes_tests;
 mod derived_models;
 #[cfg(test)]
 mod derived_models_tests;
@@ -105,6 +108,7 @@ pub fn run() {
             commands::documents::preview_next_document_code,
             commands::documents::create_document,
             commands::documents::update_document,
+            commands::documents::update_document_code_from_model_type,
             commands::documents::attach_file_to_version,
             commands::documents::associate_model_spreadsheet,
             commands::documents::detach_model_spreadsheet,

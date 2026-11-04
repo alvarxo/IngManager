@@ -246,15 +246,24 @@ export const api = {
       currentOnly,
     }),
   getDocument: (id: string) => invoke<DocumentRow>("get_document", { id }),
-  previewNextDocumentCode: (projectId: string, categoryKey: string) =>
+  previewNextDocumentCode: (
+    projectId: string,
+    categoryKey: string,
+    modelType?: string | null,
+  ) =>
     invoke<string | null>("preview_next_document_code", {
       projectId,
       categoryKey,
+      modelType: modelType ?? null,
     }),
   createDocument: (input: CreateDocumentInput) =>
     invoke<DocumentRow>("create_document", { input }),
   updateDocument: (input: UpdateDocumentInput) =>
     invoke<DocumentRow>("update_document", { input }),
+  updateDocumentCodeFromModelType: (documentId: string) =>
+    invoke<DocumentRow>("update_document_code_from_model_type", {
+      documentId,
+    }),
   attachFileToVersion: (input: AttachFileInput) =>
     invoke<DocumentFileRow>("attach_file_to_version", { input }),
   associateModelSpreadsheet: (input: AssociateModelSpreadsheetInput) =>

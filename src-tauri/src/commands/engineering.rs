@@ -711,10 +711,25 @@ pub async fn bulk_register_engineering_docs_inner(
         let doc_id = Uuid::new_v4().to_string();
         // Default display title from stem — independent of technical group_key.
         let title = g.title.clone();
+        let detected_type = {
+            let principal_name = resolved
+                .last()
+                .map(|(p, _, _)| p.file_name.as_str())
+                .unwrap_or("");
+            crate::model_types::detect_model_type_from_file_name(principal_name)
+        };
+        let model_type_str = if category_key == "modelos" {
+            Some(detected_type.as_str().to_string())
+        } else {
+            None
+        };
         let business_code = if assign_codes {
             let prefix = loc.business_code_prefix.clone();
-            let type_code =
-                crate::doc_codes::type_code_for_category(&category_key).unwrap_or("MOD");
+            let type_code = if category_key == "modelos" {
+                detected_type.code_prefix()
+            } else {
+                crate::doc_codes::type_code_for_category(&category_key).unwrap_or("MOD")
+            };
             let rows: Vec<(Option<String>,)> =
                 sqlx::query_as("SELECT business_code FROM documents WHERE project_id = ?")
                     .bind(&project_id)
@@ -733,9 +748,9 @@ pub async fn bulk_register_engineering_docs_inner(
         let mut tx = pool.begin().await?;
         sqlx::query(
             "INSERT INTO documents (
-                id, project_id, category_id, business_code, title, doc_type,
+                id, project_id, category_id, business_code, title, doc_type, model_type,
                 current_version_id, status, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, NULL, 'active', datetime('now'), datetime('now'))",
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'active', datetime('now'), datetime('now'))",
         )
         .bind(&doc_id)
         .bind(&project_id)
@@ -743,6 +758,7 @@ pub async fn bulk_register_engineering_docs_inner(
         .bind(&business_code)
         .bind(&title)
         .bind(crate::doc_codes::type_code_for_category(&category_key))
+        .bind(&model_type_str)
         .execute(&mut *tx)
         .await?;
 

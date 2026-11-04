@@ -82,11 +82,24 @@ pub fn can_auto_version_extension(ext: Option<&str>) -> bool {
             | "pdf"
             | "idea"
             | "ideastatica"
+            | "rtd"
+            | "edb"
+            | "e2k"
     ) || OTHER_PRINCIPAL_EXTS.iter().any(|a| *a == raw.as_str())
 }
 
 /// Other CAD/BIM principals (standalone unless companions share stem).
-const OTHER_PRINCIPAL_EXTS: &[&str] = &["rvt", "rfa", "dwg", "dxf", "idea", "ideastatica"];
+const OTHER_PRINCIPAL_EXTS: &[&str] = &[
+    "rvt",
+    "rfa",
+    "dwg",
+    "dxf",
+    "idea",
+    "ideastatica",
+    "rtd", // Robot Structural Analysis
+    "edb", // ETABS
+    "e2k",
+];
 
 const OTHER_AUX_EXTS: &[&str] = &["bak", "dwl", "dwl2", "rws", "dat", "tmp", "sv$", "ac$"];
 

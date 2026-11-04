@@ -2,7 +2,9 @@
 //!
 //! Rules:
 //! - Same path overwrite → update fingerprint only (no new version).
-//! - New file whose stem matches exactly one tracked document → create version + snapshot.
+//! - New file whose stem matches exactly one tracked document → create version (link in place).
+//! - Model versions: only `.sdb` creates versions; `.sbk` / SAP aux never.
+//! - Idempotent: already-linked relative path → baseline only (no new version).
 //! - Ambiguous matches → pending_version_events.
 //! - Debounce/stability checked by caller before invoking.
 
@@ -205,8 +207,13 @@ pub async fn process_path(
         return Ok(None);
     }
 
-    let abs_str = absolute_path.display().to_string();
     let parsed = parse_version_filename(&file_name);
+    // §1 — never auto-version SAP aux / .sbk (or other non-versionable exts).
+    if !crate::engineering_files::can_auto_version_extension(parsed.extension.as_deref()) {
+        return Ok(None);
+    }
+
+    let abs_str = absolute_path.display().to_string();
     let (fp, size, modified) = fingerprint_meta(absolute_path)?;
 
     let project_id = match find_project_for_path(pool, absolute_path).await? {
@@ -316,9 +323,29 @@ pub async fn process_path(
     }
 
     let (document_id, _) = &candidates[0];
+    // Model docs: only .sdb may create versions (extra guard beyond extension gate).
+    if is_modelos_document(pool, document_id).await?
+        && !crate::engineering_files::is_sap_principal_extension(
+            parsed.extension.as_deref().unwrap_or(""),
+        )
+    {
+        return Ok(None);
+    }
     let created =
         create_auto_version(pool, &project_id, document_id, absolute_path, &parsed).await?;
     Ok(Some(created))
+}
+
+async fn is_modelos_document(pool: &SqlitePool, document_id: &str) -> AppResult<bool> {
+    let row: Option<(Option<String>,)> = sqlx::query_as(
+        "SELECT c.key FROM documents d
+         LEFT JOIN categories c ON c.id = d.category_id
+         WHERE d.id = ?",
+    )
+    .bind(document_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(matches!(row.and_then(|(k,)| k), Some(k) if k == "modelos"))
 }
 
 async fn load_tracking(
@@ -485,6 +512,16 @@ async fn create_auto_version(
     let root = &loc.root_path;
     let _ = ensure_under_root(root, source)?;
 
+    if is_modelos_document(pool, document_id).await?
+        && !crate::engineering_files::is_sap_principal_extension(
+            parsed.extension.as_deref().unwrap_or(""),
+        )
+    {
+        return Err(AppError::msg(
+            "Solo archivos .sdb pueden crear versiones de modelo; .sbk/auxiliares no",
+        ));
+    }
+
     let (fp, size, modified) = fingerprint_meta(source)?;
     let file_name = source
         .file_name()
@@ -493,6 +530,34 @@ async fn create_auto_version(
     let extension = source
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase());
+
+    // Link the working file in place (no snapshot copy) — versions share the physical tree.
+    let source_rel = pathdiff_rel(root, source)?;
+
+    // §2 idempotent: same relative path already linked on this document → baseline only.
+    let existing: Option<(String, i64)> = sqlx::query_as(
+        "SELECT v.id, v.version_number
+         FROM document_files f
+         JOIN document_versions v ON v.id = f.document_version_id
+         WHERE v.document_id = ? AND f.relative_path = ? AND f.is_available = 1
+         LIMIT 1",
+    )
+    .bind(document_id)
+    .bind(&source_rel)
+    .fetch_optional(pool)
+    .await?;
+    if let Some((version_id, n)) = existing {
+        register_baseline(pool, project_id, document_id, Some(&version_id), source).await?;
+        let abs = source.display().to_string();
+        return Ok(AutoVersionResult {
+            path: abs,
+            action: "already_linked".into(),
+            document_id: Some(document_id.to_string()),
+            version_id: Some(version_id),
+            pending_id: None,
+            message: format!("Ya vinculado como v{n:02} — sin nueva versión"),
+        });
+    }
 
     let max_n: (i64,) = sqlx::query_as(
         "SELECT COALESCE(MAX(version_number), 0) FROM document_versions WHERE document_id = ?",
@@ -507,8 +572,6 @@ async fn create_auto_version(
         None => "Auto-versión por patrón Save As".into(),
     };
 
-    // Link the working file in place (no snapshot copy) — versions share the physical tree.
-    let source_rel = pathdiff_rel(root, source)?;
     let _ = snapshots_dir(root, document_id, next_n); // keep helper used for path conventions
 
     let mut tx = pool.begin().await?;
@@ -537,11 +600,18 @@ async fn create_auto_version(
     .await?;
 
     let file_id = Uuid::new_v4().to_string();
+    let file_role = if crate::engineering_files::is_sap_principal_extension(
+        extension.as_deref().unwrap_or(""),
+    ) {
+        Some("principal")
+    } else {
+        None
+    };
     sqlx::query(
         "INSERT INTO document_files (
             id, document_version_id, relative_path, file_name, extension,
-            size_bytes, modified_at, content_hash, is_available, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'))",
+            size_bytes, modified_at, content_hash, is_available, created_at, file_role
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'), ?)",
     )
     .bind(&file_id)
     .bind(&version_id)
@@ -551,6 +621,7 @@ async fn create_auto_version(
     .bind(size as i64)
     .bind(&modified)
     .bind(&fp)
+    .bind(file_role)
     .execute(&mut *tx)
     .await?;
 
@@ -684,6 +755,10 @@ pub async fn reconcile_project(
         }
         let name = entry.file_name().to_string_lossy();
         let parsed = parse_version_filename(&name);
+        // Skip aux/.sbk early so reconcile never walks them into versions.
+        if !crate::engineering_files::can_auto_version_extension(parsed.extension.as_deref()) {
+            continue;
+        }
         if !parsed.is_version_pattern {
             let tracked: (i64,) = sqlx::query_as(
                 "SELECT COUNT(*) FROM file_version_tracking WHERE project_id = ? AND base_stem = ?",
@@ -787,6 +862,11 @@ pub async fn resolve_pending(
         return Err(AppError::msg("El archivo ya no existe"));
     }
     let parsed = parse_version_filename(&row.file_name);
+    if !crate::engineering_files::can_auto_version_extension(parsed.extension.as_deref()) {
+        return Err(AppError::msg(
+            "Extensión no versionable (.sbk/auxiliares SAP no crean versiones)",
+        ));
+    }
     create_auto_version(pool, &row.project_id, document_id, &path, &parsed).await
 }
 

@@ -1206,16 +1206,42 @@ pub async fn repair_version_file_inner(
         ));
     }
 
-    let version_exists: Option<(String,)> =
-        sqlx::query_as("SELECT id FROM document_versions WHERE id = ?")
-            .bind(&input.document_version_id)
-            .fetch_optional(&state.pool)
-            .await?;
-    if version_exists.is_none() {
+    let version_meta: Option<(String, String)> = sqlx::query_as(
+        "SELECT v.id, d.project_id
+         FROM document_versions v
+         JOIN documents d ON d.id = v.document_id
+         WHERE v.id = ?",
+    )
+    .bind(&input.document_version_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((_, project_id)) = version_meta else {
         return Err(AppError::msg("Versión no encontrada"));
-    }
+    };
+
+    let document_id: (String,) =
+        sqlx::query_as("SELECT document_id FROM document_versions WHERE id = ?")
+            .bind(&input.document_version_id)
+            .fetch_one(&state.pool)
+            .await?;
+
+    // Collect old absolute paths so we can drop stale tracking after repair.
+    let loc = loc_for_version(state, &input.document_version_id).await?;
+    let mut stale_abs: Vec<String> = Vec::new();
 
     if let Some(old_id) = &input.replace_file_id {
+        let old_rel: Option<(String,)> = sqlx::query_as(
+            "SELECT relative_path FROM document_files WHERE id = ? AND document_version_id = ?",
+        )
+        .bind(old_id)
+        .bind(&input.document_version_id)
+        .fetch_optional(&state.pool)
+        .await?;
+        if let Some((rel,)) = old_rel {
+            if let Ok(abs) = join_under_root(&loc.root_path, &rel) {
+                stale_abs.push(abs.display().to_string());
+            }
+        }
         sqlx::query("UPDATE document_files SET is_available = 0 WHERE id = ? AND document_version_id = ?")
             .bind(old_id)
             .bind(&input.document_version_id)
@@ -1224,13 +1250,13 @@ pub async fn repair_version_file_inner(
     } else {
         // Mark missing/unavailable principal rows on this version so repair replaces them.
         let files = list_version_files_inner(state, &input.document_version_id).await?;
-        let loc = loc_for_version(state, &input.document_version_id).await?;
         for f in files {
             if f.is_available == 0 {
                 continue;
             }
             let abs = join_under_root(&loc.root_path, &f.relative_path)?;
             if !abs.is_file() {
+                stale_abs.push(abs.display().to_string());
                 sqlx::query("UPDATE document_files SET is_available = 0 WHERE id = ?")
                     .bind(&f.id)
                     .execute(&state.pool)
@@ -1239,7 +1265,7 @@ pub async fn repair_version_file_inner(
         }
     }
 
-    attach_file_inner(
+    let row = attach_file_inner(
         state,
         &input.document_version_id,
         &input.absolute_path,
@@ -1248,7 +1274,30 @@ pub async fn repair_version_file_inner(
         false,
         Some("principal".into()),
     )
-    .await
+    .await?;
+
+    // §4 — repair must update tracking so reconcile does not create a duplicate version.
+    crate::auto_version::register_baseline(
+        &state.pool,
+        &project_id,
+        &document_id.0,
+        Some(&input.document_version_id),
+        &path,
+    )
+    .await?;
+    for abs in stale_abs {
+        if abs != path.display().to_string() {
+            let _ = sqlx::query(
+                "DELETE FROM file_version_tracking WHERE project_id = ? AND absolute_path = ?",
+            )
+            .bind(&project_id)
+            .bind(&abs)
+            .execute(&state.pool)
+            .await;
+        }
+    }
+
+    Ok(row)
 }
 
 #[tauri::command]
@@ -1317,21 +1366,27 @@ async fn open_document_file_by_id(
 
 /// Resolve principal file id without opening (for tests / UI previews).
 /// Order: remembered per-doc format → draft DOCX of current revision → any DOCX → rank.
+/// Modelos (§5): only current `.sdb` — never `.sbk` / SAP aux.
 pub async fn resolve_document_principal_file_id(
     state: &AppState,
     document_id: &str,
 ) -> AppResult<String> {
-    let available = list_current_openable_files(state, document_id).await?;
-    if available.is_empty() {
-        return Err(AppError::msg("No hay archivos disponibles"));
-    }
-
     let docs =
         enrich_current_revisions(state, vec![fetch_document(state, document_id).await?]).await?;
     let doc = docs
         .into_iter()
         .next()
         .ok_or_else(|| AppError::msg("Documento no encontrado"))?;
+
+    let cat = doc.category_key.as_deref().unwrap_or("");
+    if cat == "modelos" {
+        return resolve_model_current_sdb_file_id(state, document_id, &doc).await;
+    }
+
+    let available = list_current_openable_files(state, document_id).await?;
+    if available.is_empty() {
+        return Err(AppError::msg("No hay archivos disponibles"));
+    }
 
     // 0) Per-document remembered format preference
     if let Some(pref) =
@@ -1387,6 +1442,61 @@ pub async fn resolve_document_principal_file_id(
     )
     .unwrap_or(0);
     Ok(available[pick].id.clone())
+}
+
+/// For modelos: open the current version's available `.sdb` only.
+/// If current has no `.sdb` (false aux version), fall back to the highest
+/// numbered version that still has an available `.sdb`.
+async fn resolve_model_current_sdb_file_id(
+    state: &AppState,
+    document_id: &str,
+    doc: &DocumentRow,
+) -> AppResult<String> {
+    let is_sdb = |f: &DocumentFileRow| {
+        let ext = f.extension.as_deref().unwrap_or("").to_ascii_lowercase();
+        crate::engineering_files::is_sap_principal_extension(&ext)
+            || f.file_name.to_ascii_lowercase().ends_with(".sdb")
+    };
+
+    if let Some(vid) = doc.current_version_id.as_deref() {
+        let files = list_version_files_inner(state, vid).await?;
+        let mut sdb: Vec<_> = files
+            .into_iter()
+            .filter(|f| f.is_available != 0 && is_sdb(f))
+            .collect();
+        if !sdb.is_empty() {
+            // Prefer file_role=principal when multiple .sdb rows exist.
+            if let Some(p) = sdb.iter().find(|f| {
+                f.file_role
+                    .as_deref()
+                    .map(|r| r == "principal")
+                    .unwrap_or(false)
+            }) {
+                return Ok(p.id.clone());
+            }
+            return Ok(sdb.remove(0).id);
+        }
+    }
+
+    // Fallback: highest version_number with an available .sdb (after false-current).
+    let rows: Vec<(String, i64, String)> = sqlx::query_as(
+        "SELECT f.id, v.version_number, f.file_name
+         FROM document_files f
+         JOIN document_versions v ON v.id = f.document_version_id
+         WHERE v.document_id = ? AND f.is_available = 1
+           AND (LOWER(COALESCE(f.extension, '')) = 'sdb'
+                OR LOWER(f.file_name) LIKE '%.sdb')
+         ORDER BY v.version_number DESC, f.created_at DESC",
+    )
+    .bind(document_id)
+    .fetch_all(&state.pool)
+    .await?;
+    rows.into_iter()
+        .next()
+        .map(|(id, _, _)| id)
+        .ok_or_else(|| {
+            AppError::msg("No hay archivo .sdb disponible para este modelo (no se abre .sbk/aux)")
+        })
 }
 
 /// Available files on the current version (optionally scoped to current revision).

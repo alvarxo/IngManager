@@ -594,7 +594,8 @@ async fn test_h_principal_open_ranking() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(name.0, "Memo.docx");
+    // Modelos: open current .sdb only (never prefer DOCX/DWG/.sbk over the model principal).
+    assert_eq!(name.0, "Model.sdb");
 }
 
 /// I — subcategory CRUD without touching document file paths.

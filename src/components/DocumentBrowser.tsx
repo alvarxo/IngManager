@@ -32,6 +32,7 @@ import type {
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui-store";
 import { Button } from "./ui/button";
+import { RepairModelHistoryDialog } from "./RepairModelHistoryDialog";
 import { UnifyModelsDialog } from "./UnifyModelsDialog";
 
 interface Props {
@@ -81,6 +82,7 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
   const [ctxMenu, setCtxMenu] = useState<DocContextMenu | null>(null);
   const [unifyOpen, setUnifyOpen] = useState(false);
   const [unifySuggestedDups, setUnifySuggestedDups] = useState<string[]>([]);
+  const [repairHistoryOpen, setRepairHistoryOpen] = useState(false);
   const [formatPicker, setFormatPicker] = useState<FormatPickerState | null>(
     null,
   );
@@ -495,6 +497,14 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
               title="Fusionar documentos lógicos duplicados de la misma familia técnica (conserva UUID/código/título del principal; no borra .sdb)"
             >
               Unificar modelos…
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => setRepairHistoryOpen(true)}
+              title="Quitar versiones falsas (.sbk/aux) del historial; conserva solo .sdb. Preview + backup SQLite. No borra archivos físicos."
+            >
+              Reparar historial…
             </Button>
             <Button
               size="sm"
@@ -964,6 +974,25 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
           onCompleted={async (message) => {
             setUnifyOpen(false);
             setUnifySuggestedDups([]);
+            await qc.invalidateQueries({
+              queryKey: ["documents", projectId, categoryKey],
+            });
+            await qc.invalidateQueries({ queryKey: ["doc-versions"] });
+            await qc.invalidateQueries({ queryKey: ["document"] });
+            await qc.invalidateQueries({ queryKey: ["doc-version-files"] });
+            await qc.invalidateQueries({ queryKey: ["categories", projectId] });
+            window.alert(message);
+          }}
+        />
+      )}
+
+      {repairHistoryOpen && categoryKey === "modelos" && (
+        <RepairModelHistoryDialog
+          projectId={projectId}
+          documentId={selectedDocumentId}
+          onClose={() => setRepairHistoryOpen(false)}
+          onCompleted={async (message) => {
+            setRepairHistoryOpen(false);
             await qc.invalidateQueries({
               queryKey: ["documents", projectId, categoryKey],
             });

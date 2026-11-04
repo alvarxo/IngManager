@@ -87,6 +87,17 @@ export function DocumentInspector() {
     enabled: !!activeVersionId && inspectorTab === "doc-versions",
   });
 
+  const sheetStatus = useQuery({
+    queryKey: ["model-sheet-status", documentId, activeVersionId],
+    queryFn: () =>
+      api.modelSpreadsheetStatus(documentId!, activeVersionId!),
+    enabled:
+      !!documentId &&
+      !!activeVersionId &&
+      inspectorTab === "doc-versions" &&
+      doc.data?.category_key === "modelos",
+  });
+
   const updateMut = useMutation({
     mutationFn: (status: string) =>
       api.updateDocument({ id: documentId!, status }),
@@ -354,6 +365,74 @@ export function DocumentInspector() {
               >
                 Adjuntar archivo
               </Button>
+              {d.category_key === "modelos" && (
+                <>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    title="Asociar XLSX/XLS/XLSM de cálculo (copy-on-version)"
+                    onClick={async () => {
+                      try {
+                        setVersionError(null);
+                        if (!d.current_version_id) return;
+                        const picked = await open({
+                          multiple: false,
+                          title: "Asociar planilla calc (XLSX/XLS/XLSM)",
+                          filters: [
+                            { name: "Excel", extensions: ["xlsx", "xls", "xlsm"] },
+                          ],
+                        });
+                        if (typeof picked !== "string") return;
+                        await api.associateModelSpreadsheet({
+                          document_version_id: d.current_version_id,
+                          absolute_path: picked,
+                          sheet_kind: "calc",
+                        });
+                        await invalidateVersionQueries();
+                        await qc.invalidateQueries({
+                          queryKey: ["model-sheet-status"],
+                        });
+                      } catch (e) {
+                        setVersionError(String(e));
+                      }
+                    }}
+                  >
+                    Asociar calc…
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    title="Asociar XLSX/XLS/XLSM de exportación (version-bound)"
+                    onClick={async () => {
+                      try {
+                        setVersionError(null);
+                        if (!d.current_version_id) return;
+                        const picked = await open({
+                          multiple: false,
+                          title: "Asociar planilla export (XLSX/XLS/XLSM)",
+                          filters: [
+                            { name: "Excel", extensions: ["xlsx", "xls", "xlsm"] },
+                          ],
+                        });
+                        if (typeof picked !== "string") return;
+                        await api.associateModelSpreadsheet({
+                          document_version_id: d.current_version_id,
+                          absolute_path: picked,
+                          sheet_kind: "export",
+                        });
+                        await invalidateVersionQueries();
+                        await qc.invalidateQueries({
+                          queryKey: ["model-sheet-status"],
+                        });
+                      } catch (e) {
+                        setVersionError(String(e));
+                      }
+                    }}
+                  >
+                    Asociar export…
+                  </Button>
+                </>
+              )}
               <Button
                 size="sm"
                 disabled={versionBusy}
@@ -491,6 +570,12 @@ export function DocumentInspector() {
             <div className="text-[11px] font-semibold uppercase text-muted">
               Archivos de la versión
             </div>
+            {doc.data?.category_key === "modelos" &&
+              sheetStatus.data?.export_pending && (
+                <p className="text-[12px] text-muted">
+                  Export: pendiente (asocie una planilla export a esta versión)
+                </p>
+              )}
             {(files.data?.length ?? 0) === 0 && (
               <p className="text-[12px] text-muted">Sin archivos en esta versión.</p>
             )}
@@ -502,7 +587,19 @@ export function DocumentInspector() {
                 >
                   <div className="min-w-0 truncate">
                     {f.file_name}
-                    {f.format_label && (
+                    {f.sheet_kind === "calc" && (
+                      <span className="ml-1 text-muted">
+                        [CALC
+                        {f.relative_path.includes(".ingmanager/snapshots/")
+                          ? " · histórico"
+                          : ""}
+                        ]
+                      </span>
+                    )}
+                    {f.sheet_kind === "export" && (
+                      <span className="ml-1 text-muted">[EXPORT]</span>
+                    )}
+                    {!f.sheet_kind && f.format_label && (
                       <span className="ml-1 text-muted">[{f.format_label}]</span>
                     )}
                     {f.is_available !== 1 && (
@@ -529,6 +626,9 @@ export function DocumentInspector() {
                     }}
                   >
                     Abrir
+                    {f.relative_path.includes(".ingmanager/snapshots/")
+                      ? " (copia)"
+                      : ""}
                   </Button>
                 </li>
               ))}

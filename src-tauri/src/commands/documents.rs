@@ -69,6 +69,11 @@ pub struct DocumentFileRow {
     pub format_label: Option<String>,
     pub revision_id: Option<String>,
     pub created_at: String,
+    pub file_role: Option<String>,
+    /// `calc` | `export` when associated to a Model document; otherwise null.
+    pub sheet_kind: Option<String>,
+    /// `copy_on_version` | `version_bound` for model spreadsheets.
+    pub version_policy: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -662,11 +667,11 @@ pub async fn update_document(
     get_document(state, input.id).await
 }
 
-async fn fetch_document_file(state: &AppState, id: &str) -> AppResult<DocumentFileRow> {
+pub(crate) async fn fetch_document_file(state: &AppState, id: &str) -> AppResult<DocumentFileRow> {
     sqlx::query_as::<_, DocumentFileRow>(
         "SELECT id, document_version_id, relative_path, file_name, extension,
                 size_bytes, modified_at, content_hash, is_available, format_label,
-                revision_id, created_at
+                revision_id, created_at, file_role, sheet_kind, version_policy
          FROM document_files WHERE id = ?",
     )
     .bind(id)
@@ -804,10 +809,12 @@ pub async fn list_version_files_inner(
     sqlx::query_as::<_, DocumentFileRow>(
         "SELECT id, document_version_id, relative_path, file_name, extension,
                 size_bytes, modified_at, content_hash, is_available, format_label,
-                revision_id, created_at
+                revision_id, created_at, file_role, sheet_kind, version_policy
          FROM document_files
          WHERE document_version_id = ?
-         ORDER BY file_name COLLATE NOCASE",
+         ORDER BY
+           CASE sheet_kind WHEN 'calc' THEN 1 WHEN 'export' THEN 2 ELSE 0 END,
+           file_name COLLATE NOCASE",
     )
     .bind(version_id)
     .fetch_all(&state.pool)
@@ -1158,6 +1165,18 @@ pub async fn create_next_physical_version_inner(
         )));
     }
 
+    // After the physical version is committed: snapshot calc onto outgoing version and
+    // re-link working originals to the new current. Exports stay on the old version.
+    if let Some(old_vid) = &prev_current {
+        crate::model_spreadsheets::promote_spreadsheets_on_next_version(
+            state,
+            &input.document_id,
+            old_vid,
+            &version_id,
+        )
+        .await?;
+    }
+
     let versions = list_document_versions_inner(state, &input.document_id).await?;
     versions
         .into_iter()
@@ -1277,7 +1296,9 @@ async fn open_document_file_by_id(
         return Err(AppError::msg("Archivo no disponible"));
     }
 
-    let force_temp = use_temp_copy.unwrap_or(is_snapshot == 1);
+    // Historical snapshots (incl. frozen model calc sheets) open via safe temp copy.
+    let under_snapshots = rel.contains(".ingmanager/snapshots/");
+    let force_temp = use_temp_copy.unwrap_or(is_snapshot == 1 || under_snapshots);
     let open_path = if force_temp {
         let tmp = temp_open_dir(&loc.root_path).join(Uuid::new_v4().to_string());
         fs::create_dir_all(&tmp)?;
@@ -1596,7 +1617,7 @@ pub async fn list_revision_files_inner(
     let mut files = sqlx::query_as::<_, DocumentFileRow>(
         "SELECT f.id, f.document_version_id, f.relative_path, f.file_name, f.extension,
                 f.size_bytes, f.modified_at, f.content_hash, f.is_available, f.format_label,
-                f.revision_id, f.created_at
+                f.revision_id, f.created_at, f.file_role, f.sheet_kind, f.version_policy
          FROM document_files f
          JOIN document_versions v ON v.id = f.document_version_id
          WHERE v.document_id = ?
@@ -1757,8 +1778,8 @@ async fn insert_unavailable_file_row(
         "INSERT INTO document_files (
             id, document_version_id, relative_path, file_name, extension,
             size_bytes, modified_at, content_hash, is_available, format_label,
-            revision_id, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, datetime('now'))",
+            revision_id, created_at, file_role, sheet_kind, version_policy
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, datetime('now'), ?, ?, ?)",
     )
     .bind(&id)
     .bind(version_id)
@@ -1770,6 +1791,9 @@ async fn insert_unavailable_file_row(
     .bind(&source.content_hash)
     .bind(&source.format_label)
     .bind(&source.revision_id)
+    .bind(&source.file_role)
+    .bind(&source.sheet_kind)
+    .bind(&source.version_policy)
     .execute(&state.pool)
     .await?;
     Ok(())
@@ -2614,4 +2638,32 @@ pub async fn mark_document_files_unavailable_for_path(
     .execute(pool)
     .await?;
     Ok(res.rows_affected())
+}
+
+#[tauri::command]
+pub async fn associate_model_spreadsheet(
+    state: State<'_, AppState>,
+    input: crate::model_spreadsheets::AssociateModelSpreadsheetInput,
+) -> AppResult<DocumentFileRow> {
+    let file_id =
+        crate::model_spreadsheets::associate_model_spreadsheet_inner(&state, input).await?;
+    fetch_document_file(&state, &file_id).await
+}
+
+#[tauri::command]
+pub async fn detach_model_spreadsheet(
+    state: State<'_, AppState>,
+    file_id: String,
+) -> AppResult<()> {
+    crate::model_spreadsheets::detach_model_spreadsheet_inner(&state, &file_id).await
+}
+
+#[tauri::command]
+pub async fn model_spreadsheet_status(
+    state: State<'_, AppState>,
+    document_id: String,
+    version_id: String,
+) -> AppResult<crate::model_spreadsheets::ModelSpreadsheetStatus> {
+    crate::model_spreadsheets::spreadsheet_status_for_version(&state, &document_id, &version_id)
+        .await
 }

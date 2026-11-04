@@ -240,6 +240,31 @@ export interface DocumentFileRow {
   format_label: string | null;
   revision_id: string | null;
   created_at: string;
+  file_role?: string | null;
+  /** `calc` | `export` when associated to a Model document. */
+  sheet_kind?: string | null;
+  /** `copy_on_version` | `version_bound`. */
+  version_policy?: string | null;
+}
+
+export type ModelSheetKind = "calc" | "export";
+
+export interface AssociateModelSpreadsheetInput {
+  document_version_id: string;
+  absolute_path: string;
+  sheet_kind: ModelSheetKind | string;
+  version_policy?: string | null;
+}
+
+export interface ModelSpreadsheetStatus {
+  document_id: string;
+  document_version_id: string;
+  is_current: boolean;
+  has_live_calc: boolean;
+  has_export: boolean;
+  export_pending: boolean;
+  calc_file_id: string | null;
+  export_file_ids: string[];
 }
 
 export interface RevisionRow {

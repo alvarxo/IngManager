@@ -60,6 +60,10 @@ import type {
   SyncModelVersionsInput,
   SyncModelVersionsResult,
   AssociateModelVersionInput,
+  UnifySuggestion,
+  UnifyModelsInput,
+  UnifyModelsPreview,
+  UnifyModelsResult,
   AvailabilityCleanupResult,
   DocumentOpenFormats,
   LogicalTreeExpandPolicy,
@@ -533,6 +537,20 @@ export const api = {
     invoke<SyncModelVersionsResult>("sync_model_versions", { input }),
   associateModelVersion: (input: AssociateModelVersionInput) =>
     invoke<DocumentVersionRow>("associate_model_version", { input }),
+  listUnifyModelSuggestions: (
+    projectId: string,
+    categoryKey?: string | null,
+    documentId?: string | null,
+  ) =>
+    invoke<UnifySuggestion[]>("list_unify_model_suggestions", {
+      projectId,
+      categoryKey: categoryKey ?? null,
+      documentId: documentId ?? null,
+    }),
+  previewUnifyModels: (input: UnifyModelsInput) =>
+    invoke<UnifyModelsPreview>("preview_unify_models", { input }),
+  applyUnifyModels: (input: UnifyModelsInput) =>
+    invoke<UnifyModelsResult>("apply_unify_models", { input }),
 
   inboxEnsureDir: () => invoke<string>("inbox_ensure_dir"),
   inboxList: () => invoke<InboxItem[]>("inbox_list"),

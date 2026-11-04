@@ -32,6 +32,7 @@ import type {
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui-store";
 import { Button } from "./ui/button";
+import { UnifyModelsDialog } from "./UnifyModelsDialog";
 
 interface Props {
   projectId: string;
@@ -78,6 +79,8 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
   const [sourcePath, setSourcePath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [ctxMenu, setCtxMenu] = useState<DocContextMenu | null>(null);
+  const [unifyOpen, setUnifyOpen] = useState(false);
+  const [unifySuggestedDups, setUnifySuggestedDups] = useState<string[]>([]);
   const [formatPicker, setFormatPicker] = useState<FormatPickerState | null>(
     null,
   );
@@ -213,9 +216,24 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
       await qc.invalidateQueries({ queryKey: ["document"] });
       await qc.invalidateQueries({ queryKey: ["doc-version-files"] });
       setError(null);
-      window.alert(
-        `Sincronización: ${r.versions_added} versión(es) añadidas en ${r.documents_touched} documento(s). Ya vinculadas: ${r.already_linked}.`,
-      );
+      let msg = `Sincronización: ${r.versions_added} versión(es) añadidas en ${r.documents_touched} documento(s). Ya vinculadas: ${r.already_linked}.`;
+      const suggestions = r.unify_suggestions ?? [];
+      if (suggestions.length > 0) {
+        const s = suggestions[0];
+        msg += `\n\nLa familia «${s.group_key}» está partida entre ${s.document_labels.join(", ")}. ¿Abrir Unificar modelos…?`;
+        if (window.confirm(msg)) {
+          const principal =
+            selectedDocumentId && s.document_ids.includes(selectedDocumentId)
+              ? selectedDocumentId
+              : s.document_ids[0];
+          setUnifySuggestedDups(s.document_ids.filter((id) => id !== principal));
+          if (principal) setSelectedDocumentId(principal);
+          setUnifyOpen(true);
+          return;
+        }
+      } else {
+        window.alert(msg);
+      }
     },
     onError: (e: Error) => setError(String(e)),
   });
@@ -470,6 +488,17 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
             <Button
               size="sm"
               variant="secondary"
+              onClick={() => {
+                setUnifySuggestedDups([]);
+                setUnifyOpen(true);
+              }}
+              title="Fusionar documentos lógicos duplicados de la misma familia técnica (conserva UUID/código/título del principal; no borra .sdb)"
+            >
+              Unificar modelos…
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
               disabled={cleanupMut.isPending}
               onClick={() => cleanupMut.mutate()}
               title="Marcar archivos faltantes como no disponible y quitar documentos lógicos vacíos (sin borrar archivos)"
@@ -682,6 +711,20 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
                   }}
                 >
                   Asociar planilla export…
+                </button>
+                <button
+                  type="button"
+                  className="block w-full px-3 py-1.5 text-left text-[12.5px] hover:bg-elevated"
+                  onClick={() => {
+                    const d = (ctxMenu.target as { kind: "doc"; doc: DocumentRow })
+                      .doc;
+                    setSelectedDocumentId(d.id);
+                    setUnifySuggestedDups([]);
+                    setCtxMenu(null);
+                    setUnifyOpen(true);
+                  }}
+                >
+                  Unificar modelos…
                 </button>
               </>
             )}
@@ -906,6 +949,31 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
             </div>
           </div>
         </div>
+      )}
+
+      {unifyOpen && categoryKey === "modelos" && (
+        <UnifyModelsDialog
+          projectId={projectId}
+          documents={docs.data ?? []}
+          initialPrincipalId={selectedDocumentId}
+          suggestedDuplicateIds={unifySuggestedDups}
+          onClose={() => {
+            setUnifyOpen(false);
+            setUnifySuggestedDups([]);
+          }}
+          onCompleted={async (message) => {
+            setUnifyOpen(false);
+            setUnifySuggestedDups([]);
+            await qc.invalidateQueries({
+              queryKey: ["documents", projectId, categoryKey],
+            });
+            await qc.invalidateQueries({ queryKey: ["doc-versions"] });
+            await qc.invalidateQueries({ queryKey: ["document"] });
+            await qc.invalidateQueries({ queryKey: ["doc-version-files"] });
+            await qc.invalidateQueries({ queryKey: ["categories", projectId] });
+            window.alert(message);
+          }}
+        />
       )}
     </div>
   );

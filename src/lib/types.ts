@@ -797,17 +797,74 @@ export interface SyncModelVersionsInput {
   document_id?: string | null;
 }
 
+export interface UnifySuggestion {
+  group_key: string;
+  document_ids: string[];
+  document_labels: string[];
+  file_names: string[];
+}
+
 export interface SyncModelVersionsResult {
   documents_touched: number;
   versions_added: number;
   already_linked: number;
   document_ids: string[];
+  unify_suggestions: UnifySuggestion[];
 }
 
 export interface AssociateModelVersionInput {
   document_id: string;
   absolute_path: string;
   notes?: string | null;
+}
+
+export interface UnifyModelsInput {
+  project_id: string;
+  principal_document_id: string;
+  duplicate_document_ids: string[];
+  category_key?: string | null;
+}
+
+export interface UnifyDocSummary {
+  document_id: string;
+  business_code: string | null;
+  title: string;
+  version_count: number;
+  file_count: number;
+}
+
+export interface UnifyVersionPlan {
+  source_document_id: string;
+  source_version_id: string;
+  file_name: string;
+  relative_path: string;
+  version_hint: string | null;
+  new_version_number: number;
+  new_label: string;
+  sheet_count: number;
+  auxiliary_count: number;
+}
+
+export interface UnifyModelsPreview {
+  principal: UnifyDocSummary;
+  duplicates: UnifyDocSummary[];
+  planned_versions: UnifyVersionPlan[];
+  relations_to_rewire: number;
+  sheets_to_transfer: number;
+  duplicates_to_delete: string[];
+  group_key: string | null;
+  warnings: string[];
+}
+
+export interface UnifyModelsResult {
+  principal_document_id: string;
+  versions_on_principal: number;
+  files_transferred: number;
+  sheets_transferred: number;
+  relations_rewired: number;
+  duplicates_deleted: string[];
+  db_backup_path: string;
+  group_key: string | null;
 }
 
 export interface UpdatePlanItemInput {

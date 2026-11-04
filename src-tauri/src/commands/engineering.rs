@@ -73,6 +73,8 @@ pub struct SyncModelVersionsResult {
     pub versions_added: usize,
     pub already_linked: usize,
     pub document_ids: Vec<String>,
+    /// Same technical family split across multiple logical docs — offer unify.
+    pub unify_suggestions: Vec<crate::unify_models::UnifySuggestion>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,6 +249,42 @@ pub async fn associate_model_version(
     input: AssociateModelVersionInput,
 ) -> AppResult<crate::commands::documents::DocumentVersionRow> {
     associate_model_version_inner(&state.pool, input).await
+}
+
+/// List model families that are split across multiple logical documents.
+#[tauri::command]
+pub async fn list_unify_model_suggestions(
+    state: State<'_, AppState>,
+    project_id: String,
+    category_key: Option<String>,
+    document_id: Option<String>,
+) -> AppResult<Vec<crate::unify_models::UnifySuggestion>> {
+    let category_key = category_key.unwrap_or_else(|| "modelos".into());
+    crate::unify_models::detect_unify_suggestions(
+        &state.pool,
+        &project_id,
+        &category_key,
+        document_id.as_deref(),
+    )
+    .await
+}
+
+/// Preview unifying duplicate logical model documents into a principal.
+#[tauri::command]
+pub async fn preview_unify_models(
+    state: State<'_, AppState>,
+    input: crate::unify_models::UnifyModelsInput,
+) -> AppResult<crate::unify_models::UnifyModelsPreview> {
+    crate::unify_models::preview_unify_models_inner(&state.pool, input).await
+}
+
+/// Apply unify: DB backup + transactional transfer; never deletes physical files.
+#[tauri::command]
+pub async fn apply_unify_models(
+    state: State<'_, AppState>,
+    input: crate::unify_models::UnifyModelsInput,
+) -> AppResult<crate::unify_models::UnifyModelsResult> {
+    crate::unify_models::apply_unify_models_inner(&state.pool, &state.db_path, input).await
 }
 
 type ResolvedPrincipal = (ClassifiedFile, String, String);
@@ -972,11 +1010,21 @@ pub async fn sync_model_versions_inner(
         }
     }
 
+    let unify_suggestions = crate::unify_models::detect_unify_suggestions(
+        pool,
+        &project_id,
+        &category_key,
+        input.document_id.as_deref(),
+    )
+    .await
+    .unwrap_or_default();
+
     Ok(SyncModelVersionsResult {
         documents_touched,
         versions_added,
         already_linked,
         document_ids,
+        unify_suggestions,
     })
 }
 

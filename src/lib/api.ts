@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AppStatus,
+  AssociateModelSpreadsheetInput,
   AttachFileInput,
   CategorySummary,
   ConflictPolicy,
@@ -62,6 +63,7 @@ import type {
   AvailabilityCleanupResult,
   DocumentOpenFormats,
   LogicalTreeExpandPolicy,
+  ModelSpreadsheetStatus,
   UpdatePlanItemInput,
   OrganizerPlanItem,
   IncorporationPreviewInput,
@@ -243,6 +245,15 @@ export const api = {
     invoke<DocumentRow>("update_document", { input }),
   attachFileToVersion: (input: AttachFileInput) =>
     invoke<DocumentFileRow>("attach_file_to_version", { input }),
+  associateModelSpreadsheet: (input: AssociateModelSpreadsheetInput) =>
+    invoke<DocumentFileRow>("associate_model_spreadsheet", { input }),
+  detachModelSpreadsheet: (fileId: string) =>
+    invoke<void>("detach_model_spreadsheet", { fileId }),
+  modelSpreadsheetStatus: (documentId: string, versionId: string) =>
+    invoke<ModelSpreadsheetStatus>("model_spreadsheet_status", {
+      documentId,
+      versionId,
+    }),
   previewDocumentIncorporation: (input: IncorporationPreviewInput) =>
     invoke<IncorporationPreview>("preview_document_incorporation", { input }),
   applyDocumentIncorporation: (input: IncorporationApplyInput) =>

@@ -35,6 +35,9 @@ mod index_sync;
 mod logical_tree;
 #[cfg(test)]
 mod logical_tree_nav_tests;
+mod model_spreadsheets;
+#[cfg(test)]
+mod model_spreadsheets_tests;
 mod models;
 #[cfg(test)]
 mod organizer_inbox_tests;
@@ -93,6 +96,9 @@ pub fn run() {
             commands::documents::create_document,
             commands::documents::update_document,
             commands::documents::attach_file_to_version,
+            commands::documents::associate_model_spreadsheet,
+            commands::documents::detach_model_spreadsheet,
+            commands::documents::model_spreadsheet_status,
             commands::incorporation_cmd::preview_document_incorporation,
             commands::incorporation_cmd::apply_document_incorporation,
             commands::documents::list_document_versions,

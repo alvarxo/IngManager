@@ -336,6 +336,60 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
     });
   }
 
+  async function associateSheetToDoc(
+    doc: DocumentRow,
+    sheetKind: "calc" | "export",
+  ) {
+    try {
+      setError(null);
+      if (!doc.current_version_id) {
+        setError("El documento no tiene versión actual");
+        return;
+      }
+      const picked = await open({
+        multiple: false,
+        title:
+          sheetKind === "calc"
+            ? "Asociar planilla calc (XLSX/XLS/XLSM)"
+            : "Asociar planilla export (XLSX/XLS/XLSM)",
+        filters: [
+          {
+            name: "Excel",
+            extensions: ["xlsx", "xls", "xlsm"],
+          },
+        ],
+      });
+      if (typeof picked !== "string") return;
+      await api.associateModelSpreadsheet({
+        document_version_id: doc.current_version_id,
+        absolute_path: picked,
+        sheet_kind: sheetKind,
+      });
+      await qc.invalidateQueries({ queryKey: ["doc-version-files"] });
+      await qc.invalidateQueries({ queryKey: ["doc-versions", doc.id] });
+      await qc.invalidateQueries({ queryKey: ["documents", projectId, categoryKey] });
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function detachSheet(file: DocumentFileRow) {
+    try {
+      setError(null);
+      if (
+        !window.confirm(
+          `¿Quitar la asociación de «${file.file_name}»? El archivo en disco no se borra.`,
+        )
+      ) {
+        return;
+      }
+      await api.detachModelSpreadsheet(file.id);
+      await qc.invalidateQueries({ queryKey: ["doc-version-files"] });
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   const statuses = useMemo(() => {
     if (categoryKey === "memorias") return MEMORIA_STATUSES;
     return ["active", "archived", "obsoleta"];
@@ -602,6 +656,35 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
                 Predeterminado: {formatChipLabel(fmt)}
               </button>
             ))}
+            {categoryKey === "modelos" && (
+              <>
+                <div className="my-1 border-t border-border" />
+                <button
+                  type="button"
+                  className="block w-full px-3 py-1.5 text-left text-[12.5px] hover:bg-elevated"
+                  onClick={() => {
+                    const d = (ctxMenu.target as { kind: "doc"; doc: DocumentRow })
+                      .doc;
+                    setCtxMenu(null);
+                    void associateSheetToDoc(d, "calc");
+                  }}
+                >
+                  Asociar planilla calc…
+                </button>
+                <button
+                  type="button"
+                  className="block w-full px-3 py-1.5 text-left text-[12.5px] hover:bg-elevated"
+                  onClick={() => {
+                    const d = (ctxMenu.target as { kind: "doc"; doc: DocumentRow })
+                      .doc;
+                    setCtxMenu(null);
+                    void associateSheetToDoc(d, "export");
+                  }}
+                >
+                  Asociar planilla export…
+                </button>
+              </>
+            )}
             <div className="my-1 border-t border-border" />
             <button
               type="button"
@@ -633,7 +716,29 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
               }}
             >
               Abrir este archivo
+              {(
+                ctxMenu.target as { kind: "file"; file: DocumentFileRow }
+              ).file.relative_path.includes(".ingmanager/snapshots/")
+                ? " (copia segura)"
+                : ""}
             </button>
+            {(
+              ctxMenu.target as { kind: "file"; file: DocumentFileRow }
+            ).file.sheet_kind && (
+              <button
+                type="button"
+                className="block w-full px-3 py-1.5 text-left text-[12.5px] text-error hover:bg-elevated"
+                onClick={() => {
+                  const f = (
+                    ctxMenu.target as { kind: "file"; file: DocumentFileRow }
+                  ).file;
+                  setCtxMenu(null);
+                  void detachSheet(f);
+                }}
+              >
+                Quitar asociación de planilla…
+              </button>
+            )}
           </div>
         ) : null}
       </div>
@@ -1188,7 +1293,19 @@ function FileLeafRow({
           style={{ paddingLeft: 12 + depth * 16 }}
         >
           <span className="truncate font-mono text-[11.5px]">{file.file_name}</span>
-          {file.format_label && (
+          {file.sheet_kind === "calc" && (
+            <span className="text-[10px] text-muted">
+              [CALC
+              {file.relative_path.includes(".ingmanager/snapshots/")
+                ? " · histórico"
+                : ""}
+              ]
+            </span>
+          )}
+          {file.sheet_kind === "export" && (
+            <span className="text-[10px] text-muted">[EXPORT]</span>
+          )}
+          {!file.sheet_kind && file.format_label && (
             <span className="text-[10px] text-muted">[{file.format_label}]</span>
           )}
           {file.is_available !== 1 && (

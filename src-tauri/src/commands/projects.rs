@@ -7,7 +7,8 @@ use crate::category_mapping::map_project_categories;
 use crate::codes::{current_year_two_digits, next_project_code};
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    CategorySummary, CreateProjectInput, Project, UpdateProjectInput, STANDARD_FOLDERS,
+    CategorySummary, CreateProjectInput, Project, RemoveProjectResult, UpdateProjectInput,
+    STANDARD_FOLDERS,
 };
 use crate::path_security::ensure_under_root;
 use crate::project_paths::{self, sanitize_folder_name, AuthorizedRoot};
@@ -346,16 +347,91 @@ pub async fn archive_project(state: State<'_, AppState>, id: String) -> AppResul
 
 #[tauri::command]
 pub async fn open_project(state: State<'_, AppState>, id: String) -> AppResult<Project> {
-    sqlx::query(
+    let project = fetch_project(&state, &id).await?;
+
+    // Timestamp update must not block a successful open.
+    let _ = sqlx::query(
         "UPDATE projects SET last_opened_at = datetime('now'), updated_at = datetime('now')
          WHERE id = ?",
     )
     .bind(&id)
     .execute(&state.pool)
-    .await?;
-    // Reconcile Save-As / version patterns on open (best-effort).
-    let _ = crate::auto_version::reconcile_project(&state.pool, &id).await;
-    fetch_project(&state, &id).await
+    .await;
+
+    // Heavy reconcile must never block open (OOM/hang risk on large projects like 1090).
+    // Fingerprint is now bounded; reconcile still walks the tree so keep it background.
+    let pool = state.pool.clone();
+    let project_id = id.clone();
+    tokio::spawn(async move {
+        let _ = crate::auto_version::reconcile_project(&pool, &project_id).await;
+    });
+
+    Ok(project)
+}
+
+/// Expected confirmation token for remove: business code, else folder name.
+pub(crate) fn expected_remove_confirm(project: &Project) -> String {
+    project
+        .code
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(project.root_relative_path.trim())
+        .to_string()
+}
+
+/// Delete SQLite registration only — never opens, reconciles, indexes, or touches disk files.
+pub async fn remove_project_registration_inner(
+    pool: &sqlx::SqlitePool,
+    id: &str,
+    confirm_code: &str,
+) -> AppResult<RemoveProjectResult> {
+    let project = sqlx::query_as::<_, Project>("SELECT * FROM projects WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| AppError::msg("Proyecto no encontrado"))?;
+
+    let expected = expected_remove_confirm(&project);
+    if confirm_code.trim() != expected {
+        return Err(AppError::msg(format!(
+            "CONFIRM_CODE:Escriba «{expected}» para confirmar"
+        )));
+    }
+
+    // Resolve path only to report it — do not open/index/reconcile.
+    let root_relative_path = project.root_relative_path.clone();
+
+    // FTS has no FK cascade.
+    sqlx::query("DELETE FROM search_fts WHERE project_id = ? OR entity_id = ?")
+        .bind(id)
+        .bind(id)
+        .execute(pool)
+        .await
+        .ok();
+
+    sqlx::query("DELETE FROM projects WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+
+    Ok(RemoveProjectResult {
+        id: id.to_string(),
+        code: project.code,
+        root_relative_path,
+        message: "Proyecto quitado de IngManager; los archivos se conservan.".to_string(),
+    })
+}
+
+/// Remove project from the app by UUID. SQLite only; physical files untouched.
+/// Does not call open_project, reconcile, or index.
+#[tauri::command]
+pub async fn remove_project_registration(
+    state: State<'_, AppState>,
+    id: String,
+    confirm_code: String,
+) -> AppResult<RemoveProjectResult> {
+    remove_project_registration_inner(&state.pool, &id, &confirm_code).await
 }
 
 #[tauri::command]

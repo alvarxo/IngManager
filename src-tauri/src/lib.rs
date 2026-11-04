@@ -17,6 +17,8 @@ mod models_versions_hotfix_tests;
 mod usability_versions_hotfix_tests;
 #[cfg(test)]
 mod memory_revisions_hotfix_tests;
+#[cfg(test)]
+mod remove_project_hotfix_tests;
 mod error;
 #[cfg(test)]
 mod flexibility_tests;
@@ -73,6 +75,7 @@ pub fn run() {
             commands::projects::update_project,
             commands::projects::archive_project,
             commands::projects::open_project,
+            commands::projects::remove_project_registration,
             commands::projects::list_project_categories,
             commands::projects::list_recent_projects,
             commands::projects::list_favorite_projects,

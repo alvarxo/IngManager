@@ -49,6 +49,13 @@ export interface UpdateProjectInput {
   is_favorite?: boolean | null;
 }
 
+export interface RemoveProjectResult {
+  id: string;
+  code: string | null;
+  root_relative_path: string;
+  message: string;
+}
+
 export interface CategorySummary {
   key: string;
   name: string;

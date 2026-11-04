@@ -112,6 +112,8 @@ pub fn wait_until_stable(path: &Path, settle: Duration, max_wait: Duration) -> b
 }
 
 pub fn fingerprint_meta(path: &Path) -> AppResult<(String, u64, Option<String>)> {
+    use std::io::{Read, Seek, SeekFrom};
+
     let meta = fs::metadata(path)?;
     let size = meta.len();
     let modified = meta.modified().ok().and_then(|t| {
@@ -124,17 +126,25 @@ pub fn fingerprint_meta(path: &Path) -> AppResult<(String, u64, Option<String>)>
         hasher.update(m.as_bytes());
     }
     hasher.update(path.to_string_lossy().as_bytes());
-    if let Ok(bytes) = fs::read(path) {
-        let sample = if bytes.len() > 4096 {
-            &bytes[..4096]
-        } else {
-            &bytes
-        };
-        hasher.update(sample);
-        if bytes.len() > 4096 {
-            hasher.update(&bytes[bytes.len().saturating_sub(1024)..]);
+
+    // Never read the whole file into memory — large engineering models (GB)
+    // previously caused OOM crashes during open reconcile (e.g. project 1090).
+    if let Ok(mut file) = fs::File::open(path) {
+        let mut head = vec![0u8; 4096.min(size as usize)];
+        if let Ok(n) = file.read(&mut head) {
+            hasher.update(&head[..n]);
         }
-        hasher.update(bytes.len().to_le_bytes());
+        if size > 4096 {
+            let tail_len = 1024u64.min(size);
+            let start = size.saturating_sub(tail_len);
+            if file.seek(SeekFrom::Start(start)).is_ok() {
+                let mut tail = vec![0u8; tail_len as usize];
+                if let Ok(n) = file.read(&mut tail) {
+                    hasher.update(&tail[..n]);
+                }
+            }
+        }
+        hasher.update(size.to_le_bytes());
     }
     Ok((hex::encode(hasher.finalize()), size, modified))
 }

@@ -52,6 +52,15 @@ pub struct UpdateProjectInput {
     pub is_favorite: Option<bool>,
 }
 
+/// Result of removing a project registration (SQLite only; files kept).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoveProjectResult {
+    pub id: String,
+    pub code: Option<String>,
+    pub root_relative_path: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct CategorySummary {
     pub key: String,

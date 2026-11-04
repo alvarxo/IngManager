@@ -24,6 +24,7 @@ import type {
   IndexedFile,
   PreviewSentResult,
   Project,
+  RemoveProjectResult,
   AuditEntry,
   AuthorizedRoot,
   BackupResult,
@@ -98,6 +99,11 @@ export const api = {
     invoke<Project>("update_project", { input }),
   archiveProject: (id: string) => invoke<Project>("archive_project", { id }),
   openProject: (id: string) => invoke<Project>("open_project", { id }),
+  removeProjectRegistration: (id: string, confirmCode: string) =>
+    invoke<RemoveProjectResult>("remove_project_registration", {
+      id,
+      confirmCode,
+    }),
   getProjectAbsolutePath: (projectId: string) =>
     invoke<string>("get_project_absolute_path", { projectId }),
   listProjectCategories: (projectId: string) =>

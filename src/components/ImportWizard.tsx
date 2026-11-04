@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import type { DetectedFolder, ImportMode, ImportPreview } from "@/lib/types";
 import { Button } from "./ui/button";
@@ -26,6 +26,23 @@ export function ImportWizard({ onDone }: Props) {
   const [authorizeParent, setAuthorizeParent] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [resultMsg, setResultMsg] = useState<string | null>(null);
+
+  const rootsQuery = useQuery({
+    queryKey: ["authorized-roots"],
+    queryFn: () => api.listAuthorizedRoots(),
+  });
+  const rootLabelById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const r of rootsQuery.data ?? []) {
+      map.set(r.id, r.label?.trim() || r.absolute_path);
+    }
+    return map;
+  }, [rootsQuery.data]);
+
+  function rootLabelFor(id: string | null | undefined): string | null {
+    if (!id) return null;
+    return rootLabelById.get(id) ?? null;
+  }
 
   async function pickSource() {
     setError(null);
@@ -173,7 +190,13 @@ export function ImportWizard({ onDone }: Props) {
                       {c.suggested_code
                         ? `código sugerido ${c.suggested_code}`
                         : "sin código"}
-                      {c.under_authorized_root ? " · bajo raíz" : " · fuera de raíz"}
+                      {c.under_authorized_root
+                        ? ` · bajo raíz${
+                            rootLabelFor(c.authorized_root_id)
+                              ? ` «${rootLabelFor(c.authorized_root_id)}»`
+                              : ""
+                          }`
+                        : " · fuera de raíz"}
                       {c.conflict_with_existing ? " · conflicto" : ""}
                       {" · "}
                       {c.matched_standard_folders.length} carpetas mapeadas
@@ -247,6 +270,16 @@ export function ImportWizard({ onDone }: Props) {
             </label>
           )}
           <div className="border border-border bg-elevated px-3 py-2 text-[12px]">
+            {(rootLabelFor(preview.authorized_root_id) ||
+              rootLabelFor(selected.authorized_root_id)) && (
+              <div>
+                Raíz:{" "}
+                <span className="font-medium">
+                  {rootLabelFor(preview.authorized_root_id) ??
+                    rootLabelFor(selected.authorized_root_id)}
+                </span>
+              </div>
+            )}
             <div>
               Destino:{" "}
               <span className="font-mono">{preview.target_absolute_path}</span>

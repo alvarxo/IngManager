@@ -61,6 +61,17 @@ export function SettingsView() {
     onError: (e: Error) => setMsg(String(e)),
   });
 
+  const renameRoot = useMutation({
+    mutationFn: ({ id, label }: { id: string; label: string }) =>
+      api.updateAuthorizedRootLabel(id, label),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["app-status"] });
+      await qc.invalidateQueries({ queryKey: ["authorized-roots"] });
+      setMsg("Etiqueta de raíz actualizada.");
+    },
+    onError: (e: Error) => setMsg(String(e)),
+  });
+
   const reindex = useMutation({
     mutationFn: () => api.reindexRoot(),
     onSuccess: () => setMsg("Reindexación iniciada…"),
@@ -151,16 +162,38 @@ export function SettingsView() {
                     {r.absolute_path}
                   </div>
                 </div>
-                {r.is_primary !== 1 && (
+                <div className="flex shrink-0 gap-1">
                   <Button
                     size="sm"
                     variant="ghost"
-                    onClick={() => removeRoot.mutate(r.id)}
-                    disabled={removeRoot.isPending}
+                    disabled={renameRoot.isPending}
+                    onClick={() => {
+                      const next = window.prompt(
+                        "Nueva etiqueta (no mueve la carpeta):",
+                        r.label ?? "",
+                      );
+                      if (next == null) return;
+                      const trimmed = next.trim();
+                      if (!trimmed) {
+                        setMsg("La etiqueta no puede estar vacía.");
+                        return;
+                      }
+                      renameRoot.mutate({ id: r.id, label: trimmed });
+                    }}
                   >
-                    Quitar
+                    Renombrar
                   </Button>
-                )}
+                  {r.is_primary !== 1 && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => removeRoot.mutate(r.id)}
+                      disabled={removeRoot.isPending}
+                    >
+                      Quitar
+                    </Button>
+                  )}
+                </div>
               </li>
             ))}
           </ul>

@@ -208,6 +208,39 @@ pub async fn add_authorized_root(
     })
 }
 
+/// Update only the display label of an authorized root. Never moves paths.
+pub async fn update_authorized_root_label(
+    pool: &SqlitePool,
+    root_id: &str,
+    label: &str,
+) -> AppResult<AuthorizedRoot> {
+    let trimmed = label.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::msg("La etiqueta de la raíz no puede estar vacía"));
+    }
+    let existing: AuthorizedRoot = sqlx::query_as(
+        "SELECT id, absolute_path, label, is_primary, created_at FROM authorized_roots WHERE id = ?",
+    )
+    .bind(root_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| AppError::msg("Raíz no encontrada"))?;
+
+    sqlx::query("UPDATE authorized_roots SET label = ? WHERE id = ?")
+        .bind(trimmed)
+        .bind(root_id)
+        .execute(pool)
+        .await?;
+
+    Ok(AuthorizedRoot {
+        id: existing.id,
+        absolute_path: existing.absolute_path,
+        label: Some(trimmed.to_string()),
+        is_primary: existing.is_primary,
+        created_at: existing.created_at,
+    })
+}
+
 pub async fn remove_authorized_root(pool: &SqlitePool, root_id: &str) -> AppResult<()> {
     let root: AuthorizedRoot = sqlx::query_as(
         "SELECT id, absolute_path, label, is_primary, created_at FROM authorized_roots WHERE id = ?",

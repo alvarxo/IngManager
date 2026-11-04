@@ -38,6 +38,9 @@ mod logical_tree_nav_tests;
 mod model_spreadsheets;
 #[cfg(test)]
 mod model_spreadsheets_tests;
+mod derived_models;
+#[cfg(test)]
+mod derived_models_tests;
 mod models;
 mod unify_models;
 #[cfg(test)]
@@ -78,6 +81,7 @@ pub fn run() {
             commands::settings::list_authorized_roots,
             commands::settings::add_authorized_root,
             commands::settings::remove_authorized_root,
+            commands::settings::update_authorized_root_label,
             commands::projects::get_project_absolute_path,
             commands::projects::preview_next_project_code,
             commands::projects::list_projects,
@@ -112,6 +116,8 @@ pub fn run() {
             commands::documents::create_document_version,
             commands::documents::preview_next_physical_version,
             commands::documents::create_next_physical_version,
+            commands::documents::preview_create_derived_model,
+            commands::documents::create_derived_model,
             commands::documents::repair_version_file,
             commands::documents::restore_document_version,
             commands::documents::delete_logical_document,

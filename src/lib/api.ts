@@ -12,7 +12,10 @@ import type {
   CreateRevisionInput,
   CreateSentTransmissionInput,
   CreateNextPhysicalVersionInput,
+  CreateDerivedModelInput,
+  CreateDerivedModelResult,
   CreateVersionInput,
+  DerivedModelPreview,
   DocumentFileRow,
   NextPhysicalVersionPreview,
   RepairVersionFileInput,
@@ -97,6 +100,8 @@ export const api = {
     }),
   removeAuthorizedRoot: (rootId: string) =>
     invoke<void>("remove_authorized_root", { rootId }),
+  updateAuthorizedRootLabel: (rootId: string, label: string) =>
+    invoke<AuthorizedRoot>("update_authorized_root_label", { rootId, label }),
 
   previewNextProjectCode: () => invoke<string>("preview_next_project_code"),
   listProjects: (includeArchived = false) =>
@@ -281,6 +286,18 @@ export const api = {
     }),
   createNextPhysicalVersion: (input: CreateNextPhysicalVersionInput) =>
     invoke<DocumentVersionRow>("create_next_physical_version", { input }),
+  previewCreateDerivedModel: (
+    sourceDocumentId: string,
+    title?: string | null,
+    copyCalcSheets?: boolean | null,
+  ) =>
+    invoke<DerivedModelPreview>("preview_create_derived_model", {
+      sourceDocumentId,
+      title: title ?? null,
+      copyCalcSheets: copyCalcSheets ?? null,
+    }),
+  createDerivedModel: (input: CreateDerivedModelInput) =>
+    invoke<CreateDerivedModelResult>("create_derived_model", { input }),
   repairVersionFile: (input: RepairVersionFileInput) =>
     invoke<DocumentFileRow>("repair_version_file", { input }),
   restoreDocumentVersion: (

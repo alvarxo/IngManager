@@ -427,6 +427,39 @@ export interface NextPhysicalVersionPreview {
   next_version_number: number;
 }
 
+export interface CreateDerivedModelInput {
+  source_document_id: string;
+  title?: string | null;
+  copy_calc_sheets?: boolean | null;
+  notes?: string | null;
+}
+
+export interface DerivedModelPreview {
+  source_document_id: string;
+  source_title: string;
+  source_business_code: string | null;
+  source_sdb_absolute_path: string;
+  proposed_title: string;
+  proposed_business_code: string;
+  destination_sdb_absolute_path: string;
+  destination_sdb_file_name: string;
+  proposed_group_key: string;
+  source_group_key: string;
+  calc_sources: string[];
+  calc_destinations: string[];
+}
+
+export interface CreateDerivedModelResult {
+  document_id: string;
+  business_code: string | null;
+  title: string;
+  version_id: string;
+  copied_sdb_absolute_path: string;
+  copied_calc_absolute_paths: string[];
+  relationship_id: string;
+  group_key: string;
+}
+
 export interface RepairVersionFileInput {
   document_version_id: string;
   absolute_path: string;

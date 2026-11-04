@@ -1,4 +1,9 @@
-import { useEffect, useState, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { MoreHorizontal, Plus, Star } from "lucide-react";
 import { api } from "@/lib/api";
@@ -8,6 +13,8 @@ import { useUiStore } from "@/stores/ui-store";
 import { Button } from "./ui/button";
 import { CreateProjectDialog } from "./CreateProjectDialog";
 import { RemoveProjectDialog } from "./RemoveProjectDialog";
+
+const ROOT_FILTER_KEY = "project_list_root_filter";
 
 interface ContextMenuState {
   x: number;
@@ -21,6 +28,8 @@ export function ProjectList() {
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [removeTarget, setRemoveTarget] = useState<Project | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [rootFilter, setRootFilter] = useState<string>("");
+  const [filterReady, setFilterReady] = useState(false);
   const view = useUiStore((s) => s.view);
   const setView = useUiStore((s) => s.setView);
   const showArchived = useUiStore((s) => s.showArchived);
@@ -29,6 +38,52 @@ export function ProjectList() {
     queryKey: ["projects", showArchived],
     queryFn: () => api.listProjects(showArchived),
   });
+
+  const rootsQuery = useQuery({
+    queryKey: ["authorized-roots"],
+    queryFn: () => api.listAuthorizedRoots(),
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .getAppSetting(ROOT_FILTER_KEY)
+      .then((v) => {
+        if (!cancelled) {
+          setRootFilter(v?.trim() || "");
+          setFilterReady(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setFilterReady(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function changeRootFilter(next: string) {
+    setRootFilter(next);
+    try {
+      await api.setAppSetting(ROOT_FILTER_KEY, next);
+    } catch (e) {
+      setActionError(`No se pudo guardar el filtro de raíz: ${String(e)}`);
+    }
+  }
+
+  const roots = rootsQuery.data ?? [];
+  const rootLabelById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const r of roots) {
+      map.set(r.id, r.label?.trim() || r.absolute_path);
+    }
+    return map;
+  }, [roots]);
+
+  const filteredProjects = useMemo(() => {
+    if (!rootFilter) return projects;
+    return projects.filter((p) => p.authorized_root_id === rootFilter);
+  }, [projects, rootFilter]);
 
   const selectedId = view.kind === "project" ? view.projectId : null;
 
@@ -100,6 +155,29 @@ export function ProjectList() {
         </Button>
       </div>
 
+      {roots.length > 0 && (
+        <div className="border-b border-border px-3 py-1.5">
+          <label className="flex items-center gap-2 text-[11.5px] text-muted">
+            <span className="shrink-0">Raíz</span>
+            <select
+              className="h-[26px] min-w-0 flex-1 border border-border bg-elevated px-1 text-[11.5px] text-text"
+              value={rootFilter}
+              disabled={!filterReady}
+              onChange={(e) => void changeRootFilter(e.target.value)}
+              title="Filtrar proyectos por raíz autorizada (UUID)"
+            >
+              <option value="">Todas</option>
+              {roots.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.label?.trim() || r.absolute_path}
+                  {r.is_primary === 1 ? " (principal)" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      )}
+
       {actionError && (
         <div className="border-b border-error/40 bg-error/10 px-3 py-2 text-[11.5px] text-error">
           {actionError}
@@ -120,16 +198,18 @@ export function ProjectList() {
         {error && (
           <div className="p-3 text-[12.5px] text-error">{String(error)}</div>
         )}
-        {!isLoading && projects.length === 0 && (
+        {!isLoading && filteredProjects.length === 0 && (
           <div className="p-4 text-[12.5px] text-muted">
-            No hay proyectos. Cree uno nuevo o importe una carpeta existente
-            desde Ajustes.
+            {projects.length === 0
+              ? "No hay proyectos. Cree uno nuevo o importe una carpeta existente desde Ajustes."
+              : "Ningún proyecto en esta raíz. Cambie el filtro o cree/importe uno."}
           </div>
         )}
         <ul>
-          {projects.map((p) => {
+          {filteredProjects.map((p) => {
             const codeLabel = p.code?.trim() || "—";
             const pathHint = p.root_relative_path;
+            const rootHint = rootLabelById.get(p.authorized_root_id);
             return (
               <li key={p.id}>
                 <div
@@ -143,7 +223,7 @@ export function ProjectList() {
                     type="button"
                     onClick={() => void openProject(p)}
                     className="flex min-w-0 flex-1 items-center gap-2 px-1 text-left"
-                    title={pathHint}
+                    title={rootHint ? `${rootHint} · ${pathHint}` : pathHint}
                   >
                     <span className="w-[52px] shrink-0 font-mono text-[12px] font-semibold text-accent">
                       {codeLabel}
@@ -153,6 +233,7 @@ export function ProjectList() {
                         {p.name}
                       </span>
                       <span className="block truncate font-mono text-[10.5px] text-muted">
+                        {rootHint ? `${rootHint} · ` : ""}
                         {pathHint}
                         {p.import_mode === "linked"
                           ? " · vinculado"

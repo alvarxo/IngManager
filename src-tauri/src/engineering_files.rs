@@ -118,7 +118,7 @@ fn extension_of(name: &str) -> Option<String> {
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
 }
 
-fn raw_stem(name: &str) -> String {
+pub fn raw_stem(name: &str) -> String {
     Path::new(name)
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())

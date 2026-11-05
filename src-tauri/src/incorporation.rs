@@ -788,10 +788,24 @@ async fn create_logical_document(
     category_id: &str,
     title: &str,
     assign_code: bool,
+    hint_file_name: Option<&str>,
 ) -> AppResult<(String, String, Option<String>)> {
     let type_code = type_code_for_category(category_key);
+    let model_type = if category_key == "modelos" {
+        let mt = hint_file_name
+            .map(crate::model_types::detect_model_type_from_file_name)
+            .unwrap_or(crate::model_types::ModelType::Other);
+        Some(mt)
+    } else {
+        None
+    };
+    let code_segment = if let Some(mt) = model_type {
+        Some(mt.code_prefix())
+    } else {
+        type_code
+    };
     let business_code = if assign_code {
-        let Some(tc) = type_code else {
+        let Some(tc) = code_segment else {
             return Err(AppError::msg("Esta categoría no tiene tipo de código"));
         };
         let rows: Vec<(Option<String>,)> =
@@ -816,12 +830,13 @@ async fn create_logical_document(
     };
     let doc_id = Uuid::new_v4().to_string();
     let version_id = Uuid::new_v4().to_string();
+    let model_type_str = model_type.map(|m| m.as_str().to_string());
 
     sqlx::query(
         "INSERT INTO documents (
-            id, project_id, category_id, business_code, title, doc_type,
+            id, project_id, category_id, business_code, title, doc_type, model_type,
             current_version_id, status, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
     )
     .bind(&doc_id)
     .bind(&loc.project_id)
@@ -829,6 +844,7 @@ async fn create_logical_document(
     .bind(&business_code)
     .bind(title)
     .bind(type_code.map(|s| s.to_string()))
+    .bind(&model_type_str)
     .bind(&version_id)
     .bind(status)
     .execute(pool)
@@ -995,6 +1011,11 @@ pub async fn apply_incorporation(
                         let assign = decision
                             .assign_code
                             .unwrap_or(input.category_key != "antecedentes");
+                        let hint_name = working_paths
+                            .iter()
+                            .find(|(_, role)| role == "principal")
+                            .or_else(|| working_paths.first())
+                            .and_then(|(p, _)| p.file_name().map(|n| n.to_string_lossy().to_string()));
                         let created = create_logical_document(
                             pool,
                             &loc,
@@ -1002,6 +1023,7 @@ pub async fn apply_incorporation(
                             &category_id,
                             &title,
                             assign,
+                            hint_name.as_deref(),
                         )
                         .await?;
                         created_documents += 1;

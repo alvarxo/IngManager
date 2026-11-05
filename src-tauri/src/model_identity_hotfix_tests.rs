@@ -175,7 +175,10 @@ async fn test_a_uuid_code_title_files_independent() {
             .unwrap();
     assert_ne!(row.0, row.2, "UUID must not equal title");
     let code = row.1.expect("business code assigned");
-    assert!(code.contains("MOD"), "expected MOD code, got {code}");
+    assert!(
+        code.contains("SAP") || code.contains("MOD"),
+        "expected SAP (or legacy MOD) code for .sdb, got {code}"
+    );
     assert_ne!(code, row.2, "code ≠ title");
     assert_ne!(code, row.0, "code ≠ UUID");
 

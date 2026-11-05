@@ -20,6 +20,8 @@ pub struct DocumentRow {
     pub business_code: Option<String>,
     pub title: String,
     pub doc_type: Option<String>,
+    /// Software subtype for Modelos: sap2000|revit|idea_statica|robot|etabs|other.
+    pub model_type: Option<String>,
     pub current_version_id: Option<String>,
     pub status: String,
     pub subcategory: Option<String>,
@@ -110,6 +112,8 @@ pub struct CreateDocumentInput {
     pub notes: Option<String>,
     pub assign_code: Option<bool>,
     pub source_absolute_path: Option<String>,
+    /// Optional Modelos subtype (`sap2000`…); detected from source path when omitted.
+    pub model_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -274,6 +278,7 @@ async fn fetch_document(state: &AppState, id: &str) -> AppResult<DocumentRow> {
     sqlx::query_as::<_, DocumentRow>(
         "SELECT
             d.id, d.project_id, d.category_id, d.business_code, d.title, d.doc_type,
+            d.model_type,
             d.current_version_id, d.status, d.subcategory, d.origin, d.received_at,
             d.notes, d.metadata_json, d.created_at, d.updated_at,
             c.key AS category_key,
@@ -400,6 +405,7 @@ pub async fn list_documents(
         sqlx::query_as::<_, DocumentRow>(
             "SELECT
                 d.id, d.project_id, d.category_id, d.business_code, d.title, d.doc_type,
+                d.model_type,
                 d.current_version_id, d.status, d.subcategory, d.origin, d.received_at,
                 d.notes, d.metadata_json, d.created_at, d.updated_at,
                 c.key AS category_key,
@@ -426,6 +432,7 @@ pub async fn list_documents(
         sqlx::query_as::<_, DocumentRow>(
             "SELECT
                 d.id, d.project_id, d.category_id, d.business_code, d.title, d.doc_type,
+                d.model_type,
                 d.current_version_id, d.status, d.subcategory, d.origin, d.received_at,
                 d.notes, d.metadata_json, d.created_at, d.updated_at,
                 c.key AS category_key,
@@ -467,10 +474,15 @@ pub async fn preview_next_document_code(
     state: State<'_, AppState>,
     project_id: String,
     category_key: String,
+    model_type: Option<String>,
 ) -> AppResult<Option<String>> {
-    let type_code = match type_code_for_category(&category_key) {
-        Some(t) => t,
-        None => return Ok(None),
+    let type_code = if category_key == "modelos" {
+        crate::model_types::model_code_prefix(model_type.as_deref())
+    } else {
+        match type_code_for_category(&category_key) {
+            Some(t) => t,
+            None => return Ok(None),
+        }
     };
     let prefix = project_business_prefix(&state, &project_id).await?;
     let rows: Vec<(Option<String>,)> =
@@ -523,8 +535,40 @@ pub async fn create_document(
         assign_code
     };
 
+    let resolved_model_type = if input.category_key == "modelos" {
+        let from_input = input
+            .model_type
+            .as_deref()
+            .and_then(crate::model_types::ModelType::parse);
+        let from_path = input.source_absolute_path.as_deref().map(|p| {
+            crate::model_types::detect_model_type_from_file_name(
+                std::path::Path::new(p)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(p),
+            )
+        });
+        Some(
+            from_input
+                .or(from_path)
+                .unwrap_or(crate::model_types::ModelType::Other)
+                .as_str()
+                .to_string(),
+        )
+    } else {
+        None
+    };
+
+    let code_type_segment = if input.category_key == "modelos" {
+        Some(crate::model_types::model_code_prefix(
+            resolved_model_type.as_deref(),
+        ))
+    } else {
+        type_code
+    };
+
     let business_code = if assign_code {
-        let Some(tc) = type_code else {
+        let Some(tc) = code_type_segment else {
             return Err(AppError::msg("Esta categoría no tiene tipo de código"));
         };
         let rows: Vec<(Option<String>,)> =
@@ -546,10 +590,10 @@ pub async fn create_document(
 
     sqlx::query(
         "INSERT INTO documents (
-            id, project_id, category_id, business_code, title, doc_type,
+            id, project_id, category_id, business_code, title, doc_type, model_type,
             current_version_id, status, subcategory, origin, received_at, notes,
             created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
     )
     .bind(&doc_id)
     .bind(&input.project_id)
@@ -557,6 +601,7 @@ pub async fn create_document(
     .bind(&business_code)
     .bind(&title)
     .bind(&doc_type)
+    .bind(&resolved_model_type)
     .bind(&version_id)
     .bind(&status)
     .bind(&input.subcategory)
@@ -671,6 +716,113 @@ pub async fn update_document(
     .ok();
 
     get_document(state, input.id).await
+}
+
+/// Optional «Actualizar código según tipo»: assign next correlativo for the
+/// document's `model_type` prefix (SAP/RVT/IDE/ROB/ETB/MOD). Keeps prior codes
+/// in the sequence pool (max+1). Re-detects type from principal when missing.
+#[tauri::command]
+pub async fn update_document_code_from_model_type(
+    state: State<'_, AppState>,
+    document_id: String,
+) -> AppResult<DocumentRow> {
+    update_document_code_from_model_type_inner(&state, &document_id).await
+}
+
+pub async fn update_document_code_from_model_type_inner(
+    state: &AppState,
+    document_id: &str,
+) -> AppResult<DocumentRow> {
+    let existing = fetch_document(state, document_id).await?;
+    if existing.category_key.as_deref() != Some("modelos") {
+        return Err(AppError::msg(
+            "Solo documentos de Modelos pueden actualizar el código según tipo",
+        ));
+    }
+
+    let mut model_type = existing
+        .model_type
+        .as_deref()
+        .and_then(crate::model_types::ModelType::parse);
+
+    if model_type.is_none() {
+        // Re-detect from current principal files.
+        if let Some(vid) = &existing.current_version_id {
+            let files = list_version_files_inner(state, vid).await?;
+            let ext = files
+                .iter()
+                .filter(|f| f.is_available != 0)
+                .find(|f| {
+                    f.file_role.as_deref() == Some("principal")
+                        || matches!(
+                            f.extension.as_deref().map(|e| e.to_ascii_lowercase()).as_deref(),
+                            Some("sdb" | "rvt" | "rfa" | "idea" | "ideastatica" | "rtd" | "edb" | "e2k")
+                        )
+                })
+                .and_then(|f| f.extension.as_deref());
+            model_type = Some(crate::model_types::detect_model_type_from_extension(ext));
+        }
+    }
+    let model_type = model_type.unwrap_or(crate::model_types::ModelType::Other);
+    let type_str = model_type.as_str().to_string();
+    let code_prefix = model_type.code_prefix();
+
+    let project_prefix = project_business_prefix(state, &existing.project_id).await?;
+    let rows: Vec<(Option<String>,)> =
+        sqlx::query_as("SELECT business_code FROM documents WHERE project_id = ?")
+            .bind(&existing.project_id)
+            .fetch_all(&state.pool)
+            .await?;
+    let codes: Vec<String> = rows.into_iter().filter_map(|r| r.0).collect();
+    let new_code = next_document_code(&project_prefix, code_prefix, &codes)?;
+
+    // Skip no-op when already on the right prefix with a code (still allow
+    // reassignment to next free if user explicitly requests refresh).
+    sqlx::query(
+        "UPDATE documents SET business_code = ?, model_type = ?, updated_at = datetime('now')
+         WHERE id = ?",
+    )
+    .bind(&new_code)
+    .bind(&type_str)
+    .bind(document_id)
+    .execute(&state.pool)
+    .await?;
+
+    crate::audit::log_event(
+        &state.pool,
+        Some(&existing.project_id),
+        "document",
+        Some(document_id),
+        "update_code_from_type",
+        Some(&format!(
+            "{} → {} ({})",
+            existing.business_code.as_deref().unwrap_or("(sin código)"),
+            new_code,
+            type_str
+        )),
+    )
+    .await
+    .ok();
+
+    crate::search_index::upsert_fts(
+        &state.pool,
+        "document",
+        document_id,
+        Some(&existing.project_id),
+        &existing.title,
+        Some(new_code.as_str()),
+        existing.notes.as_deref(),
+        None,
+    )
+    .await
+    .ok();
+
+    let doc = fetch_document(state, document_id).await?;
+    Ok(enrich_documents(state, vec![doc])
+        .await?
+        .into_iter()
+        .next()
+        .unwrap())
 }
 
 pub(crate) async fn fetch_document_file(state: &AppState, id: &str) -> AppResult<DocumentFileRow> {
@@ -2503,6 +2655,7 @@ pub async fn list_favorite_documents(
         sqlx::query_as::<_, DocumentRow>(
             "SELECT
                 d.id, d.project_id, d.category_id, d.business_code, d.title, d.doc_type,
+                d.model_type,
                 d.current_version_id, d.status, d.subcategory, d.origin, d.received_at,
                 d.notes, d.metadata_json, d.created_at, d.updated_at,
                 c.key AS category_key,
@@ -2529,6 +2682,7 @@ pub async fn list_favorite_documents(
         sqlx::query_as::<_, DocumentRow>(
             "SELECT
                 d.id, d.project_id, d.category_id, d.business_code, d.title, d.doc_type,
+                d.model_type,
                 d.current_version_id, d.status, d.subcategory, d.origin, d.received_at,
                 d.notes, d.metadata_json, d.created_at, d.updated_at,
                 c.key AS category_key,

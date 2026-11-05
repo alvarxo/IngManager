@@ -43,6 +43,8 @@ pub struct DerivedModelPreview {
     pub source_sdb_absolute_path: String,
     pub proposed_title: String,
     pub proposed_business_code: String,
+    /// Inherited software subtype (`sap2000`…).
+    pub proposed_model_type: String,
     pub destination_sdb_absolute_path: String,
     pub destination_sdb_file_name: String,
     pub proposed_group_key: String,
@@ -218,13 +220,29 @@ pub async fn preview_create_derived_model(
         ));
     }
 
+    let inherited_type = doc
+        .model_type
+        .as_deref()
+        .and_then(crate::model_types::ModelType::parse)
+        .unwrap_or_else(|| {
+            crate::model_types::detect_model_type_from_file_name(
+                source_abs
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("model.sdb"),
+            )
+        });
     let rows: Vec<(Option<String>,)> =
         sqlx::query_as("SELECT business_code FROM documents WHERE project_id = ?")
             .bind(&doc.project_id)
             .fetch_all(&state.pool)
             .await?;
     let existing: Vec<String> = rows.into_iter().filter_map(|r| r.0).collect();
-    let proposed_code = next_document_code(&loc.business_code_prefix, "MOD", &existing)?;
+    let proposed_code = next_document_code(
+        &loc.business_code_prefix,
+        inherited_type.code_prefix(),
+        &existing,
+    )?;
 
     let proposed_title = title
         .map(|t| t.trim().to_string())
@@ -271,6 +289,7 @@ pub async fn preview_create_derived_model(
         source_sdb_absolute_path: source_abs.display().to_string(),
         proposed_title,
         proposed_business_code: proposed_code,
+        proposed_model_type: inherited_type.as_str().to_string(),
         destination_sdb_absolute_path: dest.display().to_string(),
         destination_sdb_file_name: dest_name,
         proposed_group_key: group_key,
@@ -366,10 +385,10 @@ pub async fn create_derived_model_inner(
 
         sqlx::query(
             "INSERT INTO documents (
-                id, project_id, category_id, business_code, title, doc_type,
+                id, project_id, category_id, business_code, title, doc_type, model_type,
                 current_version_id, status, origin, notes,
                 created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, datetime('now'), datetime('now'))",
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, datetime('now'), datetime('now'))",
         )
         .bind(&doc_id)
         .bind(&doc.project_id)
@@ -377,6 +396,7 @@ pub async fn create_derived_model_inner(
         .bind(&preview.proposed_business_code)
         .bind(&preview.proposed_title)
         .bind(&type_code)
+        .bind(&preview.proposed_model_type)
         .bind(&version_id)
         .bind(&origin_hint)
         .bind(&notes)

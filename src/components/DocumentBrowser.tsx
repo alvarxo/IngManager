@@ -23,10 +23,17 @@ import {
   initialExpandedKeys,
   treeNodeKey,
 } from "@/lib/logical-tree";
+import {
+  filterDocsByModelType,
+  groupDocsByModelType,
+  MODEL_TYPE_OPTIONS,
+  modelTypeLabel,
+} from "@/lib/model-types";
 import type {
   DocumentFileRow,
   DocumentRow,
   DocumentVersionRow,
+  ModelType,
   RevisionRow,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -79,6 +86,11 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
   const [receivedAt, setReceivedAt] = useState("");
   const [assignCode, setAssignCode] = useState(categoryKey !== "antecedentes");
   const [sourcePath, setSourcePath] = useState<string | null>(null);
+  const [createModelType, setCreateModelType] = useState<ModelType>("other");
+  const [modelTypeFilter, setModelTypeFilter] = useState<ModelType | "all">(
+    "all",
+  );
+  const [groupByModelType, setGroupByModelType] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ctxMenu, setCtxMenu] = useState<DocContextMenu | null>(null);
   const [unifyOpen, setUnifyOpen] = useState(false);
@@ -152,10 +164,32 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
   }
 
   const codePreview = useQuery({
-    queryKey: ["doc-code", projectId, categoryKey, assignCode],
-    queryFn: () => api.previewNextDocumentCode(projectId, categoryKey),
+    queryKey: [
+      "doc-code",
+      projectId,
+      categoryKey,
+      assignCode,
+      categoryKey === "modelos" ? createModelType : null,
+    ],
+    queryFn: () =>
+      api.previewNextDocumentCode(
+        projectId,
+        categoryKey,
+        categoryKey === "modelos" ? createModelType : null,
+      ),
     enabled: createOpen && assignCode,
   });
+
+  const visibleDocs = useMemo(() => {
+    const list = docs.data ?? [];
+    if (categoryKey !== "modelos") return list;
+    return filterDocsByModelType(list, modelTypeFilter);
+  }, [docs.data, categoryKey, modelTypeFilter]);
+
+  const groupedDocs = useMemo(() => {
+    if (categoryKey !== "modelos" || !groupByModelType) return null;
+    return groupDocsByModelType(visibleDocs);
+  }, [categoryKey, groupByModelType, visibleDocs]);
 
   const subcats = useQuery({
     queryKey: ["subcategories", projectId, categoryKey],
@@ -175,12 +209,14 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
         received_at: receivedAt || null,
         assign_code: assignCode,
         source_absolute_path: sourcePath,
+        model_type: categoryKey === "modelos" ? createModelType : null,
       }),
     onSuccess: async (doc) => {
       await qc.invalidateQueries({ queryKey: ["documents", projectId, categoryKey] });
       setCreateOpen(false);
       setTitle("");
       setSourcePath(null);
+      setCreateModelType("other");
       setSelectedDocumentId(doc.id);
       setInspectorTab("doc-detail");
     },
@@ -533,6 +569,35 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
             </Button>
           </>
         )}
+        {categoryKey === "modelos" && (
+          <>
+            <label className="flex items-center gap-1.5 text-[12px] text-muted">
+              Tipo
+              <select
+                className="h-[28px] border border-border bg-elevated px-1.5 text-[12px] text-text"
+                value={modelTypeFilter}
+                onChange={(e) =>
+                  setModelTypeFilter(e.target.value as ModelType | "all")
+                }
+                title="Filtrar por subtipo de modelo"
+              >
+                {MODEL_TYPE_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-2 text-[12px] text-muted">
+              <input
+                type="checkbox"
+                checked={groupByModelType}
+                onChange={(e) => setGroupByModelType(e.target.checked)}
+              />
+              Agrupar por tipo
+            </label>
+          </>
+        )}
         <label className="ml-auto flex items-center gap-2 text-[12px] text-muted">
           <input
             type="checkbox"
@@ -599,7 +664,14 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
             </div>
           </div>
         )}
-        {(docs.data?.length ?? 0) > 0 && expandReady && (
+        {!docs.isLoading &&
+          (docs.data?.length ?? 0) > 0 &&
+          visibleDocs.length === 0 && (
+            <div className="p-8 text-center text-muted">
+              No hay modelos para el filtro de tipo seleccionado.
+            </div>
+          )}
+        {visibleDocs.length > 0 && expandReady && (
           <table className="w-full border-collapse text-left">
             <thead className="sticky top-0 bg-panel">
               <tr className="border-b border-border text-[11px] uppercase text-muted">
@@ -614,38 +686,70 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
               </tr>
             </thead>
             <tbody>
-              {docs.data?.map((d) => (
-                <DocumentTreeRows
-                  key={d.id}
-                  doc={d}
-                  projectId={projectId}
-                  categoryKey={categoryKey}
-                  usesRevisions={usesRevisions}
-                  showCurrentVersionOnly={showCurrentVersionOnly}
-                  expanded={expanded}
-                  selectedDocumentId={selectedDocumentId}
-                  onToggleExpand={toggleExpand}
-                  onSelectDoc={(id) => {
-                    setSelectedDocumentId(id);
-                    setInspectorTab("doc-detail");
-                    setCtxMenu(null);
-                  }}
-                  onOpenDoc={(id) => void openDocPreferred(id)}
-                  onOpenFile={(f) => void openFileLeaf(f)}
-                  onDocContextMenu={onDocContextMenu}
-                  onFileContextMenu={(e, doc, file) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setSelectedDocumentId(doc.id);
-                    setCtxMenu({
-                      x: e.clientX,
-                      y: e.clientY,
-                      target: { kind: "file", doc, file },
-                      formats: [],
-                    });
-                  }}
-                />
-              ))}
+              {(groupedDocs
+                ? groupedDocs.flatMap((g) => [
+                    {
+                      kind: "header" as const,
+                      key: `hdr-${g.modelType}`,
+                      label: `${g.label} (${g.docs.length})`,
+                    },
+                    ...g.docs.map((d) => ({
+                      kind: "doc" as const,
+                      key: d.id,
+                      doc: d,
+                    })),
+                  ])
+                : visibleDocs.map((d) => ({
+                    kind: "doc" as const,
+                    key: d.id,
+                    doc: d,
+                  }))
+              ).map((row) =>
+                row.kind === "header" ? (
+                  <tr
+                    key={row.key}
+                    className="border-b border-border bg-elevated/60"
+                  >
+                    <td
+                      colSpan={usesRevisions ? 6 : 5}
+                      className="px-3 py-1.5 text-[11px] font-medium uppercase tracking-wide text-muted"
+                    >
+                      {row.label}
+                    </td>
+                  </tr>
+                ) : (
+                  <DocumentTreeRows
+                    key={row.key}
+                    doc={row.doc}
+                    projectId={projectId}
+                    categoryKey={categoryKey}
+                    usesRevisions={usesRevisions}
+                    showCurrentVersionOnly={showCurrentVersionOnly}
+                    expanded={expanded}
+                    selectedDocumentId={selectedDocumentId}
+                    onToggleExpand={toggleExpand}
+                    onSelectDoc={(id) => {
+                      setSelectedDocumentId(id);
+                      setInspectorTab("doc-detail");
+                      setCtxMenu(null);
+                    }}
+                    onOpenDoc={(id) => void openDocPreferred(id)}
+                    onOpenFile={(f) => void openFileLeaf(f)}
+                    onDocContextMenu={onDocContextMenu}
+                    onFileContextMenu={(e, doc, file) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setSelectedDocumentId(doc.id);
+                      setCtxMenu({
+                        x: e.clientX,
+                        y: e.clientY,
+                        target: { kind: "file", doc, file },
+                        formats: [],
+                      });
+                    }}
+                  />
+                ),
+              )}
             </tbody>
           </table>
         )}
@@ -883,6 +987,28 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
                   <div className="h-[34px] border border-border bg-elevated px-2.5 py-1.5 font-mono text-accent">
                     {assignCode ? (codePreview.data ?? "····") : "Sin código"}
                   </div>
+                </label>
+              )}
+              {categoryKey === "modelos" && (
+                <label className="block">
+                  <div className="mb-1 text-[11.5px] text-muted">
+                    Tipo de modelo
+                  </div>
+                  <select
+                    className="h-[34px] w-full border border-border bg-elevated px-2.5"
+                    value={createModelType}
+                    onChange={(e) =>
+                      setCreateModelType(e.target.value as ModelType)
+                    }
+                  >
+                    {MODEL_TYPE_OPTIONS.filter((o) => o.value !== "all").map(
+                      (o) => (
+                        <option key={o.value} value={o.value}>
+                          {o.label} ({o.prefix})
+                        </option>
+                      ),
+                    )}
+                  </select>
                 </label>
               )}
               {categoryKey === "antecedentes" && (
@@ -1151,6 +1277,11 @@ function DocumentTreeRows({
                 {doc.business_code ?? "—"}
               </span>{" "}
               <span className="text-[13px]">{doc.title}</span>
+              {doc.model_type && (
+                <span className="ml-1 text-[10px] uppercase text-muted">
+                  · {modelTypeLabel(doc.model_type)}
+                </span>
+              )}
               {doc.has_unregistered_change === 1 && (
                 <span
                   title="Cambio detectado respecto a la versión registrada"

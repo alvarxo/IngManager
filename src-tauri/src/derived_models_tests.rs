@@ -101,17 +101,21 @@ async fn seed_model_doc(
     let file_id = uuid::Uuid::new_v4().to_string();
     write_bytes(abs, bytes);
 
+    let model_type = crate::model_types::detect_model_type_from_file_name(file_name)
+        .as_str()
+        .to_string();
     sqlx::query(
         "INSERT INTO documents (
-            id, project_id, category_id, business_code, title, doc_type, status,
+            id, project_id, category_id, business_code, title, doc_type, model_type, status,
             created_at, updated_at, current_version_id
-         ) VALUES (?, ?, ?, ?, ?, 'MOD', 'active', datetime('now'), datetime('now'), ?)",
+         ) VALUES (?, ?, ?, ?, ?, 'MOD', ?, 'active', datetime('now'), datetime('now'), ?)",
     )
     .bind(&doc_id)
     .bind(project_id)
     .bind(&cat.0)
     .bind(business_code)
     .bind(title)
+    .bind(&model_type)
     .bind(&ver_id)
     .execute(pool)
     .await
@@ -243,8 +247,16 @@ async fn test_a_new_uuid_and_mod_code_origin_unchanged() {
     .unwrap();
 
     assert_ne!(result.document_id, origin_id);
-    assert_eq!(result.business_code.as_deref(), Some("1126-MOD-002"));
+    // Origin may keep legacy MOD code; derived inherits sap2000 → SAP prefix.
+    assert_eq!(result.business_code.as_deref(), Some("1126-SAP-001"));
     assert_eq!(result.title, "Modelo derivado");
+    let derived_type: (Option<String>,) =
+        sqlx::query_as("SELECT model_type FROM documents WHERE id = ?")
+            .bind(&result.document_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(derived_type.0.as_deref(), Some("sap2000"));
 
     let origin: (String, Option<String>, String) = sqlx::query_as(
         "SELECT id, business_code, title FROM documents WHERE id = ?",

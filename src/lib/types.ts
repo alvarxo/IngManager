@@ -281,7 +281,8 @@ export interface ModelSpreadsheetStatus {
   has_live_calc: boolean;
   has_export: boolean;
   export_pending: boolean;
-  calc_file_id: string | null;
+  /** All available calc associations on this version (live and/or historical). */
+  calc_file_ids: string[];
   export_file_ids: string[];
 }
 

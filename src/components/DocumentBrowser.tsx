@@ -405,11 +405,11 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
         return;
       }
       const picked = await open({
-        multiple: false,
+        multiple: true,
         title:
           sheetKind === "calc"
-            ? "Asociar planilla calc (XLSX/XLS/XLSM)"
-            : "Asociar planilla export (XLSX/XLS/XLSM)",
+            ? "Asociar planilla(s) calc (XLSX/XLS/XLSM)"
+            : "Asociar planilla(s) export (XLSX/XLS/XLSM)",
         filters: [
           {
             name: "Excel",
@@ -417,15 +417,23 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
           },
         ],
       });
-      if (typeof picked !== "string") return;
-      await api.associateModelSpreadsheet({
-        document_version_id: doc.current_version_id,
-        absolute_path: picked,
-        sheet_kind: sheetKind,
-      });
+      const paths = Array.isArray(picked)
+        ? picked
+        : typeof picked === "string"
+          ? [picked]
+          : [];
+      if (paths.length === 0) return;
+      for (const absolute_path of paths) {
+        await api.associateModelSpreadsheet({
+          document_version_id: doc.current_version_id,
+          absolute_path,
+          sheet_kind: sheetKind,
+        });
+      }
       await qc.invalidateQueries({ queryKey: ["doc-version-files"] });
       await qc.invalidateQueries({ queryKey: ["doc-versions", doc.id] });
       await qc.invalidateQueries({ queryKey: ["documents", projectId, categoryKey] });
+      await qc.invalidateQueries({ queryKey: ["model-sheet-status"] });
     } catch (e) {
       setError(String(e));
     }

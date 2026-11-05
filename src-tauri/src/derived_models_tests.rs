@@ -1,4 +1,4 @@
-//! Derived models — Tests A–G (Part A).
+//! Derived models — Tests A–G (Part A) + multi-calc Test 9.
 //!
 //! A — New UUID + new MOD code; origin unchanged
 //! B — SDB copied: same bytes, distinct path/stem/group_key
@@ -7,6 +7,7 @@
 //! E — Without copy_calc: derived has no calc; origin intact
 //! F — No promote snapshots under origin for this op
 //! G — Guards: non-modelos / missing SDB; engineering_groups distinct
+//! 9 — Multi-calc: copy_calc associates every copied workbook (no one-calc lock)
 
 use std::fs;
 use std::path::Path;
@@ -686,4 +687,97 @@ fn allocate_derived_path_distinct_from_version_suffix() {
         .to_string_lossy()
         .contains("_v0"));
     assert_ne!(gk, normalize_group_key("MODELO", &["1126".into()]));
+}
+
+#[tokio::test]
+async fn test_9_multi_calc_derived_copy_all_sheets() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("t.db");
+    let pool = db::init_pool(&db_path).await.unwrap();
+    let root = dir.path().join("root");
+    let root_id = setup_root(&pool, &root).await;
+    let project_id = seed_project(&pool, &root_id, "P1").await;
+    let sdb = root.join("P1/02_MODELOS/MOD.sdb");
+    let (origin_id, ver_id, _) = seed_model_doc(
+        &pool,
+        &project_id,
+        "Mod",
+        "1126-MOD-001",
+        "P1/02_MODELOS/MOD.sdb",
+        "MOD.sdb",
+        &sdb,
+        b"SDB",
+    )
+    .await;
+    let state = AppState::new(pool.clone(), db_path);
+    let mut origins = Vec::new();
+    for (name, bytes) in [
+        ("calc_a.xlsx", b"CALC_A" as &[u8]),
+        ("calc_b.xlsx", b"CALC_B"),
+        ("calc_c.xlsx", b"CALC_C"),
+    ] {
+        let calc = root.join("P1/02_MODELOS").join(name);
+        write_bytes(&calc, bytes);
+        associate_model_spreadsheet_inner(
+            &state,
+            AssociateModelSpreadsheetInput {
+                document_version_id: ver_id.clone(),
+                absolute_path: calc.display().to_string(),
+                sheet_kind: SHEET_KIND_CALC.into(),
+                version_policy: None,
+            },
+        )
+        .await
+        .unwrap();
+        origins.push(calc);
+    }
+
+    let result = create_derived_model_inner(
+        &state,
+        CreateDerivedModelInput {
+            source_document_id: origin_id,
+            title: Some("Derivado multi".into()),
+            copy_calc_sheets: Some(true),
+            notes: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        result.copied_calc_absolute_paths.len(),
+        3,
+        "all three calcs must be copied"
+    );
+    for p in &result.copied_calc_absolute_paths {
+        assert!(Path::new(p).is_file(), "missing copied calc {p}");
+    }
+    for origin in &origins {
+        assert!(origin.is_file());
+    }
+
+    let derived_calcs: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM document_files
+         WHERE document_version_id = ? AND sheet_kind = 'calc' AND is_available = 1
+           AND relative_path NOT LIKE '%.ingmanager/snapshots/%'",
+    )
+    .bind(&result.version_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        derived_calcs.0, 3,
+        "associate must succeed for every copied calc (multi-calc)"
+    );
+
+    let origin_calcs: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM document_files
+         WHERE document_version_id = ? AND sheet_kind = 'calc' AND is_available = 1
+           AND relative_path NOT LIKE '%.ingmanager/snapshots/%'",
+    )
+    .bind(&ver_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(origin_calcs.0, 3, "origin calcs untouched");
 }

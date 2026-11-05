@@ -36,8 +36,8 @@ export function SetupScreen() {
   }
 
   return (
-    <div className="flex h-full items-center justify-center bg-bg">
-      <div className="w-[520px] border border-border bg-panel p-8">
+    <div className="flex h-full items-center justify-center bg-[#111827]">
+      <div className="w-[520px] border border-[#1f2937] bg-panel p-8">
         <div className="mb-6 flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-[var(--radius-md)] bg-selection text-accent">
             <HardDrive size={20} />

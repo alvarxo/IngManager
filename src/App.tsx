@@ -6,6 +6,7 @@ import type { IndexProgress } from "@/lib/types";
 import { useUiStore } from "@/stores/ui-store";
 import { SetupScreen } from "@/components/SetupScreen";
 import { AppShell } from "@/components/AppShell";
+import { UndecoratedFrame } from "@/components/WindowChrome";
 
 export default function App() {
   const qc = useQueryClient();
@@ -63,22 +64,30 @@ export default function App() {
 
   if (status.isLoading) {
     return (
-      <div className="flex h-full items-center justify-center bg-bg text-muted">
-        Iniciando IngManager…
-      </div>
+      <UndecoratedFrame>
+        <div className="flex h-full items-center justify-center bg-[#111827] text-muted">
+          Iniciando IngManager…
+        </div>
+      </UndecoratedFrame>
     );
   }
 
   if (status.error) {
     return (
-      <div className="flex h-full items-center justify-center bg-bg text-error">
-        Error al iniciar: {String(status.error)}
-      </div>
+      <UndecoratedFrame>
+        <div className="flex h-full items-center justify-center bg-[#111827] text-error">
+          Error al iniciar: {String(status.error)}
+        </div>
+      </UndecoratedFrame>
     );
   }
 
   if (!status.data?.root_valid) {
-    return <SetupScreen />;
+    return (
+      <UndecoratedFrame>
+        <SetupScreen />
+      </UndecoratedFrame>
+    );
   }
 
   return (

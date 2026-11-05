@@ -26,12 +26,34 @@ body,
 #root {
   height: 100%;
   margin: 0;
-  background: var(--color-bg);
+  padding: 0;
+  background: #111827;
   color: var(--color-text);
   font-family: var(--font-sans);
   font-size: 13px;
   line-height: 1.4;
   overflow: hidden;
+}
+
+/* Undecorated window: no phantom top chrome / safe-area gap. */
+body {
+  padding-top: 0;
+  overscroll-behavior: none;
+}
+
+[data-tauri-drag-region] {
+  app-region: drag;
+  -webkit-app-region: drag;
+}
+
+[data-tauri-drag-region="false"],
+button,
+input,
+textarea,
+select,
+a {
+  app-region: no-drag;
+  -webkit-app-region: no-drag;
 }
 
 button,

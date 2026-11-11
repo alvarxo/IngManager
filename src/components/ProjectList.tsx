@@ -22,7 +22,12 @@ interface ContextMenuState {
   project: Project;
 }
 
-export function ProjectList() {
+interface ProjectListProps {
+  /** Keep the parent flyout open while menus/dialogs are active. */
+  onBusyChange?: (busy: boolean) => void;
+}
+
+export function ProjectList({ onBusyChange }: ProjectListProps) {
   const qc = useQueryClient();
   const [createOpen, setCreateOpen] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
@@ -33,6 +38,10 @@ export function ProjectList() {
   const view = useUiStore((s) => s.view);
   const setView = useUiStore((s) => s.setView);
   const showArchived = useUiStore((s) => s.showArchived);
+
+  useEffect(() => {
+    onBusyChange?.(Boolean(createOpen || contextMenu || removeTarget));
+  }, [createOpen, contextMenu, removeTarget, onBusyChange]);
 
   const { data: projects = [], isLoading, error } = useQuery({
     queryKey: ["projects", showArchived],

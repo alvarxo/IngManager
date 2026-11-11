@@ -1,6 +1,7 @@
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { TopBar } from "./TopBar";
 import { LeftSidebar } from "./LeftSidebar";
+import { ProjectList } from "./ProjectList";
 import { HomeView } from "./HomeView";
 import { ProjectWorkspace } from "./ProjectWorkspace";
 import { Inspector } from "./Inspector";
@@ -25,6 +26,10 @@ export function AppShell({ rootPath, indexMessage }: Props) {
       <div className="relative flex min-h-0 flex-1">
         <LeftSidebar />
         <Group orientation="horizontal" className="min-w-0 flex-1">
+          <Panel defaultSize={280} minSize={200} maxSize={420} className="min-w-0">
+            <ProjectList />
+          </Panel>
+          <Separator className="w-px bg-border data-[separator-active]:bg-accent" />
           <Panel minSize={360} className="min-w-0">
             <main className="h-full min-w-0">
               {view.kind === "home" && <HomeView />}

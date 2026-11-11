@@ -212,22 +212,26 @@ fn classify_code_body(body: &str, allow_multi_letter: bool) -> Option<(String, b
 }
 
 /// Parse revision from a file name (with extension).
+///
+/// Handles compound stems from naming #20: `Doc_RB_v01.docx` → revision `B`
+/// (version stripped first). Bare `_RA` / legacy `_RevA` still work.
 pub fn parse_revision_filename(file_name: &str) -> Option<ParsedRevision> {
     let stem = Path::new(file_name)
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| file_name.to_string());
-    strip_revision_suffix(&stem).1
+    parse_compound_stem(&stem).revision
 }
 
-/// Document identity key for grouping (lowercase, revision stripped).
+/// Document identity key for grouping (lowercase, revision + `_vNN` stripped).
 pub fn revision_identity_key(file_name: &str) -> String {
     let stem = Path::new(file_name)
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| file_name.to_string());
-    let (identity, _) = strip_revision_suffix(&stem);
-    identity.to_ascii_lowercase()
+    parse_compound_stem(&stem)
+        .identity_stem
+        .to_ascii_lowercase()
 }
 
 /// Status string for a revision code: `draft` (letters) or `issued` (digits).
@@ -362,5 +366,55 @@ mod unit_tests {
         let (base2, ver2) = strip_vnn_suffix("Doc_RA_v02");
         assert_eq!(base2, "Doc_RA");
         assert_eq!(ver2, Some(2));
+    }
+
+    #[test]
+    fn filename_rb_v01_detects_revision_b() {
+        let p = parse_revision_filename("1133_3-000-MC-0001_RB_v01.docx").expect("_RB_v01");
+        assert_eq!(p.revision_code, "B");
+        assert!(p.is_draft);
+        assert_eq!(p.identity_stem, "1133_3-000-MC-0001");
+
+        let compound = parse_compound_stem("1133_3-000-MC-0001_RB_v01");
+        assert_eq!(
+            compound.revision.as_ref().map(|r| r.revision_code.as_str()),
+            Some("B")
+        );
+        assert_eq!(compound.version_number, Some(1));
+
+        assert_eq!(
+            parse_revision_filename("1133_3-000-MC-0001_RA_v02.pdf")
+                .map(|r| r.revision_code),
+            Some("A".into())
+        );
+        assert_eq!(
+            parse_revision_filename("Doc_R0_v01.docx").map(|r| r.revision_code),
+            Some("0".into())
+        );
+        assert_eq!(
+            parse_revision_filename("Doc_R1.docx").map(|r| r.revision_code),
+            Some("1".into())
+        );
+        // No `_R` → null (version-only / bare stem).
+        assert!(parse_revision_filename("Doc_v01.docx").is_none());
+        assert!(parse_revision_filename("Doc.docx").is_none());
+        // `_vNN` alone is not a revision; legacy `_Rev*` still parses as revision.
+        assert!(parse_revision_filename("MODELO_v01.sdb").is_none());
+        assert_eq!(
+            parse_revision_filename("Memoria_RevA.docx").map(|r| r.revision_code),
+            Some("A".into())
+        );
+    }
+
+    #[test]
+    fn identity_key_strips_compound_rb_v01() {
+        assert_eq!(
+            revision_identity_key("1126-MC-002_RB_v01.docx"),
+            revision_identity_key("1126-MC-002_RA_v02.pdf")
+        );
+        assert_eq!(
+            revision_identity_key("1126-MC-002_RB_v01.docx"),
+            "1126-mc-002"
+        );
     }
 }

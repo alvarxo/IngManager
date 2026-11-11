@@ -47,6 +47,8 @@ import type {
   TrashItem,
   UpdateDocumentInput,
   UpdateProjectInput,
+  RevisionFolderPreview,
+  RevisionFolderApplyResult,
   OrganizerScanItem,
   OrganizerPlanResult,
   OrganizerApplyResult,
@@ -111,6 +113,15 @@ export const api = {
     invoke<Project>("create_project", { input }),
   updateProject: (input: UpdateProjectInput) =>
     invoke<Project>("update_project", { input }),
+  previewRevisionFolderReorg: (projectId: string) =>
+    invoke<RevisionFolderPreview>("preview_revision_folder_reorg", {
+      projectId,
+    }),
+  applyRevisionFolderReorg: (projectId: string, sessionId: string) =>
+    invoke<RevisionFolderApplyResult>("apply_revision_folder_reorg", {
+      projectId,
+      sessionId,
+    }),
   archiveProject: (id: string) => invoke<Project>("archive_project", { id }),
   openProject: (id: string) => invoke<Project>("open_project", { id }),
   removeProjectRegistration: (id: string, confirmCode: string) =>

@@ -610,27 +610,17 @@ pub fn next_working_filename(current_file_name: &str, next_version_number: i64) 
 
 /// Resolve a free destination path beside `source`, starting at `next_version_number`.
 /// Bumps the `_vNN` suffix until the path does not exist (cap 999).
+/// For revision/version subfolders, use `revision_folders::allocate_next_working_path`.
 pub fn allocate_next_working_path(
     source: &Path,
     next_version_number: i64,
 ) -> Result<PathBuf, String> {
-    let parent = source
-        .parent()
-        .ok_or_else(|| "Archivo fuente sin directorio padre".to_string())?;
-    let file_name = source
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| "Nombre de archivo inválido".to_string())?;
-    let mut n = next_version_number.max(1);
-    for _ in 0..1000 {
-        let candidate_name = next_working_filename(file_name, n);
-        let dest = parent.join(&candidate_name);
-        if !dest.exists() {
-            return Ok(dest);
-        }
-        n += 1;
-    }
-    Err("No hay nombre libre para la siguiente versión física".into())
+    crate::revision_folders::allocate_next_working_path(
+        source,
+        next_version_number,
+        None,
+        false,
+    )
 }
 
 #[cfg(test)]

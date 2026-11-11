@@ -1205,10 +1205,21 @@ pub async fn preview_next_physical_version_inner(
     document_id: &str,
     source_absolute_path: Option<&str>,
 ) -> AppResult<NextPhysicalVersionPreview> {
+    let doc = fetch_document(state, document_id).await?;
+    let into_folders = crate::revision_folders::project_physical_revision_folders(
+        &state.pool,
+        &doc.project_id,
+    )
+    .await?;
     let (source, next_n) =
         resolve_current_principal_source(state, document_id, source_absolute_path).await?;
-    let dest = crate::engineering_files::allocate_next_working_path(&source, next_n)
-        .map_err(AppError::msg)?;
+    let dest = crate::revision_folders::allocate_next_working_path(
+        &source,
+        next_n,
+        doc.category_key.as_deref(),
+        into_folders,
+    )
+    .map_err(AppError::msg)?;
     let dest_name = dest
         .file_name()
         .and_then(|s| s.to_str())
@@ -1238,6 +1249,11 @@ pub async fn create_next_physical_version_inner(
     let loc = loc_for_document(state, &input.document_id).await?;
     let doc = fetch_document(state, &input.document_id).await?;
     let prev_current = doc.current_version_id.clone();
+    let into_folders = crate::revision_folders::project_physical_revision_folders(
+        &state.pool,
+        &doc.project_id,
+    )
+    .await?;
 
     let (source, next_n) = resolve_current_principal_source(
         state,
@@ -1247,17 +1263,14 @@ pub async fn create_next_physical_version_inner(
     .await?;
 
     // Authorize destination under project root.
-    let dest = crate::engineering_files::allocate_next_working_path(&source, next_n)
-        .map_err(AppError::msg)?;
-    let dest_rel = dest
-        .strip_prefix(&loc.root_path)
-        .map_err(|_| AppError::msg("Destino fuera del root autorizado del proyecto"))?;
-    let _ = dest_rel; // path_security via join later; ensure under root
-    if !dest.starts_with(&loc.root_path) {
-        return Err(AppError::msg(
-            "Destino fuera del root autorizado del proyecto",
-        ));
-    }
+    let dest = crate::revision_folders::allocate_next_working_path(
+        &source,
+        next_n,
+        doc.category_key.as_deref(),
+        into_folders,
+    )
+    .map_err(AppError::msg)?;
+    let _ = crate::path_security::ensure_under_root(&loc.root_path, &dest)?;
 
     // Atomic preference: filesystem first.
     fs::copy(&source, &dest).map_err(|e| {
@@ -2188,32 +2201,6 @@ pub async fn create_revision(
     create_revision_inner(&state, input).await
 }
 
-/// Allocate `{identity}_R{code}_v01…` beside `source` without colliding.
-fn allocate_revision_working_path(
-    source: &Path,
-    revision_code: &str,
-    start_version: i64,
-) -> Result<PathBuf, String> {
-    let parent = source
-        .parent()
-        .ok_or_else(|| "Archivo fuente sin directorio padre".to_string())?;
-    let file_name = source
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| "Nombre de archivo inválido".to_string())?;
-    let mut n = start_version.max(1);
-    for _ in 0..1000 {
-        let candidate_name =
-            crate::doc_revisions::apply_revision_version_filename(file_name, revision_code, n);
-        let dest = parent.join(&candidate_name);
-        if !dest.exists() {
-            return Ok(dest);
-        }
-        n += 1;
-    }
-    Err("No hay nombre libre para la revisión física".into())
-}
-
 pub async fn create_revision_inner(
     state: &AppState,
     input: CreateRevisionInput,
@@ -2376,6 +2363,11 @@ pub async fn create_revision_inner(
 
     let mut created_paths: Vec<PathBuf> = Vec::new();
     let mut frozen = 0usize;
+    let into_folders = crate::revision_folders::project_physical_revision_folders(
+        &state.pool,
+        &source_doc.project_id,
+    )
+    .await?;
 
     let result = async {
         for (abs, label) in &sources {
@@ -2398,7 +2390,15 @@ pub async fn create_revision_inner(
             frozen += 1;
 
             // Working copy with `_R{code}_v01` (bump if collision).
-            let dest = allocate_revision_working_path(abs, &code, 1).map_err(AppError::msg)?;
+            // When project flag is on → write under CATEGORIA/<RA|R0>/…
+            let dest = crate::revision_folders::allocate_revision_working_path(
+                abs,
+                &code,
+                1,
+                into_folders,
+            )
+            .map_err(AppError::msg)?;
+            let _ = crate::path_security::ensure_under_root(&loc.root_path, &dest)?;
             fs::copy(abs, &dest).map_err(|e| {
                 AppError::msg(format!(
                     "No se pudo copiar a {}: {e}",

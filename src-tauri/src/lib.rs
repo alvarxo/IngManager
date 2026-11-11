@@ -18,6 +18,8 @@ mod usability_versions_hotfix_tests;
 #[cfg(test)]
 mod memory_revisions_hotfix_tests;
 #[cfg(test)]
+mod revision_folders_tests;
+#[cfg(test)]
 mod model_identity_hotfix_tests;
 #[cfg(test)]
 mod remove_project_hotfix_tests;
@@ -54,6 +56,7 @@ mod sap_false_versions_hotfix_tests;
 #[cfg(test)]
 mod organizer_inbox_tests;
 mod organizer;
+mod revision_folders;
 mod path_security;
 mod project_paths;
 mod search_index;
@@ -194,6 +197,8 @@ pub fn run() {
             commands::organizer::organizer_update_plan_item,
             commands::organizer::organizer_list_sessions,
             commands::organizer::list_project_folder_mappings,
+            commands::revision_folders_cmd::preview_revision_folder_reorg,
+            commands::revision_folders_cmd::apply_revision_folder_reorg,
             commands::engineering::list_engineering_groups,
             commands::engineering::list_category_files_filtered,
             commands::engineering::bulk_register_engineering_docs,

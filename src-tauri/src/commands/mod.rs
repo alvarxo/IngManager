@@ -11,6 +11,7 @@ pub mod indexing;
 pub mod incorporation_cmd;
 pub mod organizer;
 pub mod projects;
+pub mod revision_folders_cmd;
 pub mod search;
 pub mod settings;
 pub mod transmissions;

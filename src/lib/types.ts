@@ -21,6 +21,8 @@ export interface Project {
   start_date: string | null;
   end_date: string | null;
   is_favorite: number;
+  /** 1 = nuevas emisiones escriben en CATEGORIA/RA/ (o vNN/ en modelos). */
+  physical_revision_folders: number;
   last_opened_at: string | null;
   created_at: string;
   updated_at: string;
@@ -47,6 +49,32 @@ export interface UpdateProjectInput {
   start_date?: string | null;
   end_date?: string | null;
   is_favorite?: boolean | null;
+  physical_revision_folders?: boolean | null;
+}
+
+export interface RevisionFolderMoveItem {
+  document_file_id: string;
+  category_key: string;
+  source_relative_path: string;
+  dest_relative_path: string;
+  action: string;
+  detail: string | null;
+}
+
+export interface RevisionFolderPreview {
+  project_id: string;
+  session_id: string;
+  items: RevisionFolderMoveItem[];
+  to_move: number;
+  skipped: number;
+}
+
+export interface RevisionFolderApplyResult {
+  session_id: string;
+  moved: number;
+  skipped: number;
+  failed: number;
+  backup_absolute_path: string | null;
 }
 
 export interface RemoveProjectResult {

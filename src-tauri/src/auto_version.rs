@@ -62,6 +62,26 @@ pub fn parse_version_filename(file_name: &str) -> ParsedVersionName {
 
 fn try_parse_stem(stem: &str) -> Option<(String, Option<String>)> {
     let trimmed = stem.trim();
+    // Compound `_R{rev}_vNN`: version is only `_vNN`; revision stays in the base stem
+    // so `Memo_RA_v02` groups with `Memo_RA` / `Memo_RA_v01`, not as a new revision.
+    let compound = crate::doc_revisions::parse_compound_stem(trimmed);
+    if compound.version_number.is_some() {
+        let base = match &compound.revision {
+            Some(rev) => crate::doc_revisions::build_compound_stem(
+                &compound.identity_stem,
+                Some(&rev.revision_code),
+                None,
+            ),
+            None => compound.identity_stem.clone(),
+        };
+        let hint = compound.version_number.map(|n| format!("{n:02}"));
+        return Some((base, hint));
+    }
+    // Bare `_RA` / `_R0` is a revision identity, not an internal version pattern.
+    if compound.revision.is_some() {
+        return None;
+    }
+
     let (base, hint) = crate::engineering_files::strip_version_suffix(trimmed);
     if base == trimmed && hint.is_none() {
         None
@@ -910,11 +930,21 @@ mod tests {
     }
 
     #[test]
-    fn parses_rev() {
+    fn bare_rev_suffix_is_not_version_pattern() {
+        // `_RevB` / `_RB` are revisions (memorias/planos), not internal `_vNN`.
         let p = parse_version_filename("Detalle_RevB.dwg");
+        assert!(!p.is_version_pattern);
+        assert_eq!(p.base_stem, "detalle_revb");
+        let ra = parse_version_filename("Memo_RA.docx");
+        assert!(!ra.is_version_pattern);
+    }
+
+    #[test]
+    fn compound_revision_keeps_r_in_base() {
+        let p = parse_version_filename("Memo_RA_v02.docx");
         assert!(p.is_version_pattern);
-        assert_eq!(p.base_stem, "detalle");
-        assert_eq!(p.version_hint.as_deref(), Some("B"));
+        assert_eq!(p.base_stem, "memo_ra");
+        assert_eq!(p.version_hint.as_deref(), Some("02"));
     }
 
     #[test]

@@ -686,9 +686,19 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
                 <th className="h-[36px] px-3 font-medium">Documento / árbol</th>
                 <th className="w-[100px] px-3 font-medium">Estado</th>
                 {usesRevisions && (
-                  <th className="w-[100px] px-3 font-medium">Revisión actual</th>
+                  <th
+                    className="w-[110px] px-3 font-medium"
+                    title="Revisión formal del documento (_RA, _R0, …). Emitir crea otro documento."
+                  >
+                    Revisión (_R)
+                  </th>
                 )}
-                <th className="w-[70px] px-3 font-medium">Versión</th>
+                <th
+                  className="w-[90px] px-3 font-medium"
+                  title="Versión de trabajo interna (_v01, _v02). En memorias/planos no cambia el _R."
+                >
+                  Versión (_v)
+                </th>
                 <th className="w-[70px] px-3 font-medium">Archivos</th>
                 <th className="w-[110px] px-3 font-medium">Notas</th>
               </tr>
@@ -1315,8 +1325,11 @@ function DocumentTreeRows({
         {usesRevisions && (
           <td className="px-3 font-mono text-[12px]">
             {doc.current_revision_code ? (
-              <span className="inline-flex items-center gap-1">
-                {doc.current_revision_code}
+              <span
+                className="inline-flex items-center gap-1"
+                title={`Revisión _R${doc.current_revision_code}`}
+              >
+                R{doc.current_revision_code}
                 <span className="text-[10px] uppercase text-muted">
                   {doc.current_revision_status === "issued" ? "emitida" : "borrador"}
                 </span>
@@ -1326,7 +1339,10 @@ function DocumentTreeRows({
             )}
           </td>
         )}
-        <td className="px-3 font-mono text-[12px]">
+        <td
+          className="px-3 font-mono text-[12px]"
+          title="Versión de trabajo (_vNN)"
+        >
           {doc.current_version_label ?? "—"}
         </td>
         <td className="px-3 tabular-nums text-muted">{doc.file_count}</td>

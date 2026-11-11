@@ -2188,6 +2188,32 @@ pub async fn create_revision(
     create_revision_inner(&state, input).await
 }
 
+/// Allocate `{identity}_R{code}_v01…` beside `source` without colliding.
+fn allocate_revision_working_path(
+    source: &Path,
+    revision_code: &str,
+    start_version: i64,
+) -> Result<PathBuf, String> {
+    let parent = source
+        .parent()
+        .ok_or_else(|| "Archivo fuente sin directorio padre".to_string())?;
+    let file_name = source
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "Nombre de archivo inválido".to_string())?;
+    let mut n = start_version.max(1);
+    for _ in 0..1000 {
+        let candidate_name =
+            crate::doc_revisions::apply_revision_version_filename(file_name, revision_code, n);
+        let dest = parent.join(&candidate_name);
+        if !dest.exists() {
+            return Ok(dest);
+        }
+        n += 1;
+    }
+    Err("No hay nombre libre para la revisión física".into())
+}
+
 pub async fn create_revision_inner(
     state: &AppState,
     input: CreateRevisionInput,
@@ -2204,18 +2230,20 @@ pub async fn create_revision_inner(
             let _ = base;
             parsed.map(|p| p.revision_code)
         })
-        .unwrap_or_else(|| {
-            // bare A / 0 already
-            let status_probe = crate::doc_revisions::status_for_code(&code);
-            let _ = status_probe;
-            code.clone()
-        });
+        .unwrap_or_else(|| code.clone());
 
-    let doc = fetch_document(state, &input.document_id).await?;
-    let version_id = input
+    let source_doc = fetch_document(state, &input.document_id).await?;
+    let cat_key = source_doc.category_key.as_deref().unwrap_or("");
+    if !crate::doc_revisions::category_uses_revisions(cat_key) {
+        return Err(AppError::msg(
+            "Emitir revisión solo aplica a memorias y planos (modelos usan solo _vNN)",
+        ));
+    }
+
+    let source_version_id = input
         .document_version_id
         .clone()
-        .or(doc.current_version_id.clone())
+        .or(source_doc.current_version_id.clone())
         .ok_or_else(|| AppError::msg("El documento no tiene versión actual"))?;
 
     let freeze_linked = input.freeze_linked.unwrap_or(true);
@@ -2235,54 +2263,10 @@ pub async fn create_revision_inner(
         }
     });
 
-    // Reuse existing revision row for same code when present
-    let existing: Option<(String,)> = sqlx::query_as(
-        "SELECT id FROM revisions WHERE document_id = ? AND revision_code = ? LIMIT 1",
-    )
-    .bind(&input.document_id)
-    .bind(&code)
-    .fetch_optional(&state.pool)
-    .await?;
-
-    let was_existing = existing.is_some();
-    let id = if let Some((eid,)) = existing {
-        sqlx::query(
-            "UPDATE revisions SET issued_at = COALESCE(?, issued_at), notes = COALESCE(?, notes),
-                document_version_id = ?, status = ? WHERE id = ?",
-        )
-        .bind(&issued_at)
-        .bind(&input.notes)
-        .bind(&version_id)
-        .bind(status)
-        .bind(&eid)
-        .execute(&state.pool)
-        .await?;
-        eid
-    } else {
-        let id = Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO revisions (
-                id, document_id, revision_code, issued_at, notes, created_at,
-                document_version_id, status
-             ) VALUES (?, ?, ?, ?, ?, datetime('now'), ?, ?)",
-        )
-        .bind(&id)
-        .bind(&input.document_id)
-        .bind(&code)
-        .bind(&issued_at)
-        .bind(&input.notes)
-        .bind(&version_id)
-        .bind(status)
-        .execute(&state.pool)
-        .await?;
-        id
-    };
-
     let loc = loc_for_document(state, &input.document_id).await?;
-    let mut frozen = 0usize;
 
-    // Emitir revisión: freeze currently linked working formats (snapshot copies).
-    // Include draft-linked working files (revision_id may already point at A/B).
+    // Collect working files to freeze + copy into the new revision document.
+    let mut sources: Vec<(PathBuf, Option<String>)> = Vec::new();
     if freeze_linked {
         let linked: Vec<(String, String, Option<String>)> = sqlx::query_as(
             "SELECT id, relative_path, format_label FROM document_files
@@ -2290,83 +2274,192 @@ pub async fn create_revision_inner(
                AND relative_path NOT LIKE '%/.ingmanager/snapshots/%'
                AND relative_path NOT LIKE '%.ingmanager/snapshots/%'",
         )
-        .bind(&version_id)
+        .bind(&source_version_id)
         .fetch_all(&state.pool)
         .await?;
 
-        for (_fid, rel, label) in &linked {
-            let abs = match crate::path_security::join_under_root(&loc.root_path, rel) {
+        for (_fid, rel, label) in linked {
+            let abs = match crate::path_security::join_under_root(&loc.root_path, &rel) {
                 Ok(p) if p.is_file() => p,
                 _ => continue,
             };
-            match crate::incorporation::snapshot_file_to_version(
-                &state.pool,
-                &loc,
-                &input.document_id,
-                &version_id,
-                doc.current_version_number.unwrap_or(1),
-                &abs,
-                label.as_deref(),
-                Some("issued_revision"),
-                Some(&id),
-            )
-            .await
-            {
-                Ok(_) => frozen += 1,
-                Err(e) => {
-                    return Err(AppError::msg(format!(
-                        "No se pudo congelar {}: {e}",
-                        abs.display()
-                    )));
-                }
-            }
-            // Point the working link at this revision as well (no re-copy of working file)
-            sqlx::query(
-                "UPDATE document_files SET revision_id = ? WHERE document_version_id = ? AND relative_path = ?",
-            )
-            .bind(&id)
-            .bind(&version_id)
-            .bind(rel)
-            .execute(&state.pool)
-            .await?;
+            sources.push((abs, label));
         }
     }
-
     let labels = input.format_labels.unwrap_or_default();
     for (i, path) in extra_paths.iter().enumerate() {
-        let label = labels.get(i).cloned();
-        attach_file_inner(
-            state,
-            &version_id,
-            path,
-            label,
-            Some(id.clone()),
-            true, // snapshot issued formats
-            Some("issued_revision".into()),
-        )
-        .await?;
-        frozen += 1;
+        let p = PathBuf::from(path);
+        if p.is_file() {
+            sources.push((p, labels.get(i).cloned()));
+        }
     }
 
-    if frozen == 0 {
-        // Roll back empty revision row when newly created
-        if !was_existing {
-            sqlx::query("DELETE FROM revisions WHERE id = ?")
-                .bind(&id)
-                .execute(&state.pool)
-                .await?;
-        }
+    if sources.is_empty() {
         return Err(AppError::msg(
             "Revisión vacía: no hay formatos vinculados ni rutas para congelar",
         ));
     }
+
+    // New document = this revision. Same business_code / category (código base).
+    let new_doc_id = Uuid::new_v4().to_string();
+    let new_ver_id = Uuid::new_v4().to_string();
+    let rev_id = Uuid::new_v4().to_string();
+
+    let mut tx = state.pool.begin().await?;
+
+    sqlx::query(
+        "INSERT INTO documents (
+            id, project_id, category_id, business_code, title, doc_type, model_type,
+            current_version_id, status, subcategory, origin, received_at, notes,
+            created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
+    )
+    .bind(&new_doc_id)
+    .bind(&source_doc.project_id)
+    .bind(&source_doc.category_id)
+    .bind(&source_doc.business_code)
+    .bind(&source_doc.title)
+    .bind(&source_doc.doc_type)
+    .bind(&source_doc.model_type)
+    .bind(&new_ver_id)
+    .bind(&source_doc.status)
+    .bind(&source_doc.subcategory)
+    .bind(&source_doc.origin)
+    .bind(&source_doc.received_at)
+    .bind(&input.notes)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO document_versions (
+            id, document_id, version_number, label, notes, created_at, is_snapshot
+         ) VALUES (?, ?, 1, ?, ?, datetime('now'), 0)",
+    )
+    .bind(&new_ver_id)
+    .bind(&new_doc_id)
+    .bind(version_label(1))
+    .bind(Option::<String>::None)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO revisions (
+            id, document_id, revision_code, issued_at, notes, created_at,
+            document_version_id, status
+         ) VALUES (?, ?, ?, ?, ?, datetime('now'), ?, ?)",
+    )
+    .bind(&rev_id)
+    .bind(&new_doc_id)
+    .bind(&code)
+    .bind(&issued_at)
+    .bind(&input.notes)
+    .bind(&new_ver_id)
+    .bind(status)
+    .execute(&mut *tx)
+    .await?;
+
+    // Provenance: new revision document → source document.
+    let rel_id = Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT OR IGNORE INTO document_relationships (
+            id, source_document_id, target_document_id, relation_type, notes, created_at
+         ) VALUES (?, ?, ?, 'revision_de', ?, datetime('now'))",
+    )
+    .bind(&rel_id)
+    .bind(&new_doc_id)
+    .bind(&input.document_id)
+    .bind(format!("Revisión {code}"))
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    let mut created_paths: Vec<PathBuf> = Vec::new();
+    let mut frozen = 0usize;
+
+    let result = async {
+        for (abs, label) in &sources {
+            // Freeze source bytes as historical snapshot on the new revision.
+            crate::incorporation::snapshot_file_to_version(
+                &state.pool,
+                &loc,
+                &new_doc_id,
+                &new_ver_id,
+                1,
+                abs,
+                label.as_deref(),
+                Some("issued_revision"),
+                Some(&rev_id),
+            )
+            .await
+            .map_err(|e| {
+                AppError::msg(format!("No se pudo congelar {}: {e}", abs.display()))
+            })?;
+            frozen += 1;
+
+            // Working copy with `_R{code}_v01` (bump if collision).
+            let dest = allocate_revision_working_path(abs, &code, 1).map_err(AppError::msg)?;
+            fs::copy(abs, &dest).map_err(|e| {
+                AppError::msg(format!(
+                    "No se pudo copiar a {}: {e}",
+                    dest.display()
+                ))
+            })?;
+            created_paths.push(dest.clone());
+
+            attach_file_inner(
+                state,
+                &new_ver_id,
+                &dest.display().to_string(),
+                label.clone(),
+                Some(rev_id.clone()),
+                false,
+                Some("principal".into()),
+            )
+            .await?;
+        }
+        Ok::<(), AppError>(())
+    }
+    .await;
+
+    if let Err(e) = result {
+        for p in &created_paths {
+            let _ = fs::remove_file(p);
+        }
+        let _ = sqlx::query("DELETE FROM documents WHERE id = ?")
+            .bind(&new_doc_id)
+            .execute(&state.pool)
+            .await;
+        return Err(e);
+    }
+
+    if frozen == 0 {
+        let _ = sqlx::query("DELETE FROM documents WHERE id = ?")
+            .bind(&new_doc_id)
+            .execute(&state.pool)
+            .await;
+        return Err(AppError::msg(
+            "Revisión vacía: no hay formatos vinculados ni rutas para congelar",
+        ));
+    }
+
+    crate::audit::log_event(
+        &state.pool,
+        Some(&source_doc.project_id),
+        "document",
+        Some(&new_doc_id),
+        "create_revision_document",
+        Some(&format!("Revisión {code} desde {}", input.document_id)),
+    )
+    .await
+    .ok();
 
     sqlx::query_as::<_, RevisionRow>(
         "SELECT id, document_id, revision_code, issued_at, notes, created_at,
                 document_version_id, status
          FROM revisions WHERE id = ?",
     )
-    .bind(id)
+    .bind(rev_id)
     .fetch_one(&state.pool)
     .await
     .map_err(AppError::from)

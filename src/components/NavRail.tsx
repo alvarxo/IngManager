@@ -10,7 +10,12 @@ import {
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui-store";
 
-export function NavRail() {
+interface NavRailProps {
+  /** Icon-only column for the collapsible left rail. */
+  compact?: boolean;
+}
+
+export function NavRail({ compact = false }: NavRailProps) {
   const view = useUiStore((s) => s.view);
   const setView = useUiStore((s) => s.setView);
   const showArchived = useUiStore((s) => s.showArchived);
@@ -67,6 +72,37 @@ export function NavRail() {
       onClick: () => setView({ kind: "settings" }),
     },
   ];
+
+  if (compact) {
+    return (
+      <nav
+        className="flex min-h-0 flex-1 flex-col"
+        aria-label="Navegación"
+      >
+        <ul className="flex flex-col items-center gap-0.5 py-2">
+          {items.map((item) => (
+            <li key={item.id}>
+              <button
+                type="button"
+                onClick={item.onClick}
+                title={item.label}
+                aria-label={item.label}
+                aria-current={item.active ? "page" : undefined}
+                className={cn(
+                  "flex h-8 w-8 items-center justify-center rounded-[var(--radius-sm)]",
+                  item.active
+                    ? "bg-selection text-text"
+                    : "text-muted hover:bg-elevated hover:text-text",
+                )}
+              >
+                <item.icon size={16} />
+              </button>
+            </li>
+          ))}
+        </ul>
+      </nav>
+    );
+  }
 
   return (
     <nav className="flex w-[220px] shrink-0 flex-col border-r border-border bg-panel">

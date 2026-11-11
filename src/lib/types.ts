@@ -518,6 +518,14 @@ export interface CreateRevisionInput {
   format_labels?: string[] | null;
   /** Default true: snapshot currently linked working formats. */
   freeze_linked?: boolean | null;
+  /** Memorias/planos: also spawn modelo(s) with the same `_R` + `_v01`. */
+  also_create_model_revision?: boolean | null;
+  /** Explicit modelo origen id(s) when spawning (required if ambiguous). */
+  source_model_document_ids?: string[] | null;
+}
+
+export interface CreateRevisionResult extends RevisionRow {
+  spawned_model_document_ids: string[];
 }
 
 export interface AttachFileInput {

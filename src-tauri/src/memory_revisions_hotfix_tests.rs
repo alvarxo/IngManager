@@ -390,6 +390,8 @@ async fn emitir_freezes_linked_formats_no_empty() {
             file_paths: Some(vec![]),
             format_labels: None,
             freeze_linked: Some(false),
+            also_create_model_revision: None,
+            source_model_document_ids: None,
         },
     )
     .await;
@@ -406,6 +408,8 @@ async fn emitir_freezes_linked_formats_no_empty() {
             file_paths: None,
             format_labels: None,
             freeze_linked: Some(true),
+            also_create_model_revision: None,
+            source_model_document_ids: None,
         },
     )
     .await

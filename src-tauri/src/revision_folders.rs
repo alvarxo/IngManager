@@ -1,4 +1,5 @@
-//! Physical folders per revision (memorias/planos) and optional version folders (modelos).
+//! Physical folders per revision (memorias/planos/modelos) and version folders
+//! for legacy modelos without `_R`.
 //!
 //! Scheme (stable, short, aligned with `_RA` / `_R0` filename tokens):
 //!
@@ -10,14 +11,14 @@
 //!     1126-MC-002_RB_v01.docx
 //!   R0/
 //!     …
-//! 02_MODELOS/          (optional, when flag on)
-//!   v01/
+//! 02_MODELOS/
+//!   RB/                      # when `_R` present (parity with docs)
+//!     1126-SAP-001_RB_v01.sdb
+//!   v01/                     # legacy: only `_vNN`, no `_R`
 //!     Modelo_v01.sdb
-//!   v02/
-//!     Modelo_v02.sdb
 //! ```
 //!
-//! Files without a parseable revision (memorias/planos) or `_vNN` (modelos) stay flat.
+//! Files without a parseable revision (memorias/planos) or `_R`/`_vNN` (modelos) stay flat.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -96,15 +97,19 @@ pub fn target_subfolder_for_file(file_name: &str, category_key: &str) -> Option<
         .unwrap_or_else(|| file_name.to_string());
     let compound = parse_compound_stem(&stem);
 
+    // Modelos: prefer `_R` folder (RB/…) when present; else legacy `vNN/`.
+    if category_key == "modelos" {
+        if let Some(r) = &compound.revision {
+            return Some(revision_folder_name(&r.revision_code));
+        }
+        return compound.version_number.map(version_folder_name);
+    }
+
     if category_uses_revisions(category_key) {
         return compound
             .revision
             .as_ref()
             .map(|r| revision_folder_name(&r.revision_code));
-    }
-
-    if category_key == "modelos" {
-        return compound.version_number.map(version_folder_name);
     }
 
     None
@@ -711,6 +716,14 @@ mod unit_tests {
         assert_eq!(
             target_subfolder_for_file("Modelo_v02.sdb", "modelos").as_deref(),
             Some("v02")
+        );
+        assert_eq!(
+            target_subfolder_for_file("1126-SAP-001_RB_v01.sdb", "modelos").as_deref(),
+            Some("RB")
+        );
+        assert_eq!(
+            target_subfolder_for_file("1126-SAP-001_RA_v02.sdb", "modelos").as_deref(),
+            Some("RA")
         );
         assert_eq!(target_subfolder_for_file("Modelo.sdb", "modelos"), None);
     }

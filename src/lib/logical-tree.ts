@@ -27,6 +27,16 @@ export function categoryUsesRevisions(categoryKey: string): boolean {
   return categoryKey === "memorias" || categoryKey === "planos";
 }
 
+/** Column Revisión (_R) — memorias/planos + modelos (parity naming). */
+export function categoryShowsRevisionColumn(categoryKey: string): boolean {
+  return categoryUsesRevisions(categoryKey) || categoryKey === "modelos";
+}
+
+/** Categories that can emit formal `_R…_v01` revisions. */
+export function categorySupportsRevisions(categoryKey: string): boolean {
+  return categoryShowsRevisionColumn(categoryKey);
+}
+
 export function normalizeFormatToken(token: string): string {
   return token.trim().replace(/^\./, "").toLowerCase();
 }

@@ -224,6 +224,8 @@ async fn create_revision_writes_into_ra_when_flag_on() {
             freeze_linked: Some(true),
             file_paths: None,
             format_labels: None,
+            also_create_model_revision: None,
+            source_model_document_ids: None,
         },
     )
     .await

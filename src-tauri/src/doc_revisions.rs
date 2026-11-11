@@ -1,10 +1,11 @@
-//! Issued / draft revision codes for memorias and planos.
+//! Issued / draft revision codes for memorias, planos, and modelos.
 //!
 //! Filename patterns (`_RA`, `_RB`, `_R0`, `_RevA`, …) are **revisions**, not
 //! internal working versions (`_v01`). Sequence: A → B → 0 → 1 → 2.
 //!
-//! Combined physical naming (memorias/planos): `{identity}_R{code}_v{NN}{ext}`
-//! e.g. `1126-MC-002_RA_v01.docx`. Modelos SAP keep `_vNN` only (no `_R`).
+//! Combined physical naming: `{identity}_R{code}_v{NN}{ext}`
+//! e.g. `1126-MC-002_RA_v01.docx`, `1126-SAP-001_RB_v01.sdb`.
+//! Modelos may keep legacy `_vNN` only until a revision is emitted.
 
 use std::path::Path;
 
@@ -29,6 +30,10 @@ pub struct ParsedCompoundStem {
 }
 
 /// Strip a revision suffix from a stem. Returns `(identity, Some(parsed))` or `(stem, None)`.
+///
+/// Digit-only tokens after `-` (e.g. business correlativo `1126-SAP-001`) are **not**
+/// revisions — require `_0` / `_R0` / `Rev0`. Hyphen remains valid for `Rev*` / letter
+/// forms (`Plano-Rev.B`).
 pub fn strip_revision_suffix(stem: &str) -> (String, Option<ParsedRevision>) {
     let stem = stem.trim();
     if stem.is_empty() {
@@ -41,7 +46,15 @@ pub fn strip_revision_suffix(stem: &str) -> (String, Option<ParsedRevision>) {
         if base.is_empty() || suffix.is_empty() {
             return (stem.to_string(), None);
         }
+        let sep = stem.as_bytes()[idx] as char;
         if let Some(parsed) = parse_revision_token(suffix) {
+            let digit_only = parsed.0.chars().all(|c| c.is_ascii_digit());
+            let suf_l = suffix.to_ascii_lowercase();
+            let explicit_rev_word = suf_l.starts_with("rev");
+            // `1126-SAP-001` / `1126-MC-010` → correlativo, not revision code.
+            if sep == '-' && digit_only && !explicit_rev_word {
+                return (stem.to_string(), None);
+            }
             return (
                 base.to_string(),
                 Some(ParsedRevision {
@@ -284,7 +297,14 @@ pub fn display_revision_code(code: &str) -> String {
     c.to_string()
 }
 
-/// Whether this category uses issued revisions (memorias / planos).
+/// Whether this category can emit / parse formal revisions (`_R…`).
+/// Includes modelos (parity with memorias/planos naming).
+pub fn category_supports_revisions(category_key: &str) -> bool {
+    matches!(category_key, "memorias" | "planos" | "modelos")
+}
+
+/// Whether the logical tree middle level is revision (memorias / planos).
+/// Modelos keep version branches in the tree; revision is column + emit flow.
 pub fn category_uses_revisions(category_key: &str) -> bool {
     matches!(category_key, "memorias" | "planos")
 }
@@ -310,6 +330,16 @@ mod unit_tests {
             assert_eq!(p.revision_code, code, "code for {stem}");
             assert_eq!(p.is_draft, draft, "draft for {stem}");
         }
+        // Business correlativo must not be eaten as revision.
+        let (base, parsed) = strip_revision_suffix("1126-SAP-001");
+        assert!(parsed.is_none(), " -001 is correlativo");
+        assert_eq!(base, "1126-SAP-001");
+        let p = parse_compound_stem("1126-SAP-001_RB_v01");
+        assert_eq!(p.identity_stem, "1126-SAP-001");
+        assert_eq!(
+            apply_revision_version_filename("1126-SAP-001.sdb", "B", 1),
+            "1126-SAP-001_RB_v01.sdb"
+        );
     }
 
     #[test]
@@ -401,9 +431,16 @@ mod unit_tests {
         // `_vNN` alone is not a revision; legacy `_Rev*` still parses as revision.
         assert!(parse_revision_filename("MODELO_v01.sdb").is_none());
         assert_eq!(
+            parse_revision_filename("1126-SAP-001_RB_v01.sdb").map(|r| r.revision_code),
+            Some("B".into())
+        );
+        assert_eq!(
             parse_revision_filename("Memoria_RevA.docx").map(|r| r.revision_code),
             Some("A".into())
         );
+        assert!(category_supports_revisions("modelos"));
+        assert!(category_supports_revisions("memorias"));
+        assert!(!category_uses_revisions("modelos"));
     }
 
     #[test]

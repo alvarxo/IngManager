@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 import {
+  categoryShowsRevisionColumn,
   categoryUsesRevisions,
   expandedSetToRecord,
   formatChipLabel,
@@ -105,6 +106,7 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
   const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const usesRevisions = categoryUsesRevisions(categoryKey);
+  const showRevisionColumn = categoryShowsRevisionColumn(categoryKey);
 
   const docs = useQuery({
     queryKey: ["documents", projectId, categoryKey],
@@ -685,17 +687,17 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
               <tr className="border-b border-border text-[11px] uppercase text-muted">
                 <th className="h-[36px] px-3 font-medium">Documento / árbol</th>
                 <th className="w-[100px] px-3 font-medium">Estado</th>
-                {usesRevisions && (
+                {showRevisionColumn && (
                   <th
                     className="w-[110px] px-3 font-medium"
-                    title="Revisión formal del documento (_RA, _R0, …). Emitir crea otro documento."
+                    title="Revisión formal (_RA, _R0, …). En modelos alinea con la memoria/plano hermano."
                   >
                     Revisión (_R)
                   </th>
                 )}
                 <th
                   className="w-[90px] px-3 font-medium"
-                  title="Versión de trabajo interna (_v01, _v02). En memorias/planos no cambia el _R."
+                  title="Versión de trabajo interna (_v01, _v02). Dentro de una revisión no cambia el _R."
                 >
                   Versión (_v)
                 </th>
@@ -729,7 +731,7 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
                     className="border-b border-border bg-elevated/60"
                   >
                     <td
-                      colSpan={usesRevisions ? 6 : 5}
+                      colSpan={showRevisionColumn ? 6 : 5}
                       className="px-3 py-1.5 text-[11px] font-medium uppercase tracking-wide text-muted"
                     >
                       {row.label}
@@ -742,6 +744,7 @@ export function DocumentBrowser({ projectId, categoryKey }: Props) {
                     projectId={projectId}
                     categoryKey={categoryKey}
                     usesRevisions={usesRevisions}
+                    showRevisionColumn={showRevisionColumn}
                     showCurrentVersionOnly={showCurrentVersionOnly}
                     expanded={expanded}
                     selectedDocumentId={selectedDocumentId}
@@ -1203,6 +1206,7 @@ interface DocumentTreeRowsProps {
   projectId: string;
   categoryKey: string;
   usesRevisions: boolean;
+  showRevisionColumn: boolean;
   showCurrentVersionOnly: boolean;
   expanded: Set<string>;
   selectedDocumentId: string | null;
@@ -1221,6 +1225,7 @@ interface DocumentTreeRowsProps {
 function DocumentTreeRows({
   doc,
   usesRevisions,
+  showRevisionColumn,
   showCurrentVersionOnly,
   expanded,
   selectedDocumentId,
@@ -1322,7 +1327,7 @@ function DocumentTreeRows({
           </div>
         </td>
         <td className="px-3 text-[12px] text-muted">{doc.status}</td>
-        {usesRevisions && (
+        {showRevisionColumn && (
           <td className="px-3 font-mono text-[12px]">
             {doc.current_revision_code ? (
               <span
@@ -1353,14 +1358,20 @@ function DocumentTreeRows({
 
       {isOpen && usesRevisions && revisions.isLoading && (
         <tr className="border-b border-border/40">
-          <td colSpan={6} className="px-10 py-1 text-[11px] text-muted">
+          <td
+            colSpan={showRevisionColumn ? 6 : 5}
+            className="px-10 py-1 text-[11px] text-muted"
+          >
             Cargando revisiones…
           </td>
         </tr>
       )}
       {isOpen && !usesRevisions && versions.isLoading && (
         <tr className="border-b border-border/40">
-          <td colSpan={5} className="px-10 py-1 text-[11px] text-muted">
+          <td
+            colSpan={showRevisionColumn ? 6 : 5}
+            className="px-10 py-1 text-[11px] text-muted"
+          >
             Cargando versiones…
           </td>
         </tr>
@@ -1372,7 +1383,7 @@ function DocumentTreeRows({
             key={node.row.id}
             doc={doc}
             revision={node.row}
-            usesRevisions={usesRevisions}
+            showRevisionColumn={showRevisionColumn}
             expanded={expanded}
             onToggleExpand={onToggleExpand}
             onOpenFile={onOpenFile}
@@ -1383,7 +1394,7 @@ function DocumentTreeRows({
             key={node.row.id}
             doc={doc}
             version={node.row}
-            usesRevisions={usesRevisions}
+            showRevisionColumn={showRevisionColumn}
             expanded={expanded}
             onToggleExpand={onToggleExpand}
             onOpenFile={onOpenFile}
@@ -1398,7 +1409,7 @@ function DocumentTreeRows({
 function RevisionBranch({
   doc,
   revision,
-  usesRevisions,
+  showRevisionColumn,
   expanded,
   onToggleExpand,
   onOpenFile,
@@ -1406,7 +1417,7 @@ function RevisionBranch({
 }: {
   doc: DocumentRow;
   revision: RevisionRow;
-  usesRevisions: boolean;
+  showRevisionColumn: boolean;
   expanded: Set<string>;
   onToggleExpand: (key: string, e?: ReactMouseEvent) => void;
   onOpenFile: (file: DocumentFileRow) => void;
@@ -1423,7 +1434,7 @@ function RevisionBranch({
     queryFn: () => api.listRevisionFiles(revision.id),
     enabled: isOpen,
   });
-  const colSpan = usesRevisions ? 6 : 5;
+  const colSpan = showRevisionColumn ? 6 : 5;
 
   return (
     <>
@@ -1482,7 +1493,7 @@ function RevisionBranch({
 function VersionBranch({
   doc,
   version,
-  usesRevisions,
+  showRevisionColumn,
   expanded,
   onToggleExpand,
   onOpenFile,
@@ -1490,7 +1501,7 @@ function VersionBranch({
 }: {
   doc: DocumentRow;
   version: DocumentVersionRow;
-  usesRevisions: boolean;
+  showRevisionColumn: boolean;
   expanded: Set<string>;
   onToggleExpand: (key: string, e?: ReactMouseEvent) => void;
   onOpenFile: (file: DocumentFileRow) => void;
@@ -1507,7 +1518,7 @@ function VersionBranch({
     queryFn: () => api.listVersionFiles(version.id),
     enabled: isOpen,
   });
-  const colSpan = usesRevisions ? 6 : 5;
+  const colSpan = showRevisionColumn ? 6 : 5;
 
   return (
     <>

@@ -10,6 +10,7 @@ import type {
   CreateDocumentInput,
   CreateProjectInput,
   CreateRevisionInput,
+  CreateRevisionResult,
   CreateSentTransmissionInput,
   CreateNextPhysicalVersionInput,
   CreateDerivedModelInput,
@@ -401,7 +402,7 @@ export const api = {
   listRevisions: (documentId: string) =>
     invoke<RevisionRow[]>("list_revisions", { documentId }),
   createRevision: (input: CreateRevisionInput) =>
-    invoke<RevisionRow>("create_revision", { input }),
+    invoke<CreateRevisionResult>("create_revision", { input }),
   repairDocumentRevisions: (documentId: string) =>
     invoke<{
       document_id: string;

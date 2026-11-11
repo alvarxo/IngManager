@@ -173,6 +173,40 @@ pub struct CreateRevisionInput {
     pub format_labels: Option<Vec<String>>,
     /// When true (default), snapshot currently linked working formats onto the revision.
     pub freeze_linked: Option<bool>,
+    /// Memorias/planos: also spawn linked modelo(s) with the same `_R` + `_v01`.
+    pub also_create_model_revision: Option<bool>,
+    /// Explicit modelo document id(s) to copy when spawning. Required if ambiguous.
+    pub source_model_document_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateRevisionResult {
+    pub id: String,
+    pub document_id: String,
+    pub revision_code: String,
+    pub issued_at: Option<String>,
+    pub notes: Option<String>,
+    pub created_at: String,
+    pub document_version_id: Option<String>,
+    pub status: Option<String>,
+    /// Model documents created alongside this memoria/plano revision (opt-in).
+    pub spawned_model_document_ids: Vec<String>,
+}
+
+impl CreateRevisionResult {
+    fn from_row(row: RevisionRow, spawned: Vec<String>) -> Self {
+        Self {
+            id: row.id,
+            document_id: row.document_id,
+            revision_code: row.revision_code,
+            issued_at: row.issued_at,
+            notes: row.notes,
+            created_at: row.created_at,
+            document_version_id: row.document_version_id,
+            status: row.status,
+            spawned_model_document_ids: spawned,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -375,11 +409,13 @@ async fn enrich_current_revisions(
         by_doc.entry(doc_id).or_default().push((code, status));
     }
 
-    // Filename tokens from current-version working files (memorias/planos).
+    // Filename tokens from current-version working files (memorias/planos/modelos).
     let version_ids: Vec<String> = docs
         .iter()
         .filter(|d| {
-            crate::doc_revisions::category_uses_revisions(d.category_key.as_deref().unwrap_or(""))
+            crate::doc_revisions::category_supports_revisions(
+                d.category_key.as_deref().unwrap_or(""),
+            )
         })
         .filter_map(|d| d.current_version_id.clone())
         .collect();
@@ -411,12 +447,12 @@ async fn enrich_current_revisions(
 
     for doc in &mut docs {
         let cat = doc.category_key.as_deref().unwrap_or("");
-        let uses_rev = crate::doc_revisions::category_uses_revisions(cat);
+        let supports_rev = crate::doc_revisions::category_supports_revisions(cat);
 
         let mut candidates: Vec<(String, Option<String>)> =
             by_doc.remove(&doc.id).unwrap_or_default();
 
-        if uses_rev {
+        if supports_rev {
             if let Some(vid) = doc.current_version_id.as_deref() {
                 if let Some(codes) = file_codes_by_version.get(vid) {
                     for code in codes {
@@ -910,7 +946,7 @@ pub(crate) async fn fetch_document_file(state: &AppState, id: &str) -> AppResult
 /// Attach a file to a version.
 /// Default: **link** the working path under the project's authorized root.
 /// Set `take_snapshot` to copy into `.ingmanager/snapshots` (issued revisions / freeze).
-async fn attach_file_inner(
+pub(crate) async fn attach_file_inner(
     state: &AppState,
     version_id: &str,
     absolute_path: &str,
@@ -1758,7 +1794,7 @@ pub async fn list_current_openable_files(
         .collect();
 
     let cat = doc.category_key.as_deref().unwrap_or("");
-    if crate::doc_revisions::category_uses_revisions(cat) {
+    if crate::doc_revisions::category_supports_revisions(cat) {
         if let Some(code) = doc.current_revision_code.as_deref() {
             // Prefer files of the current revision when revision rows exist
             let rev_files: Vec<_> = available
@@ -1999,9 +2035,9 @@ pub async fn repair_document_revisions_inner(
 ) -> AppResult<RepairRevisionsResult> {
     let doc = fetch_document(state, &input.document_id).await?;
     let cat = doc.category_key.as_deref().unwrap_or("");
-    if !crate::doc_revisions::category_uses_revisions(cat) {
+    if !crate::doc_revisions::category_supports_revisions(cat) {
         return Err(AppError::msg(
-            "La reparación de revisiones aplica a memorias y planos",
+            "La reparación de revisiones aplica a memorias, planos y modelos",
         ));
     }
     let current_vid = doc
@@ -2266,14 +2302,14 @@ pub async fn list_revisions(
 pub async fn create_revision(
     state: State<'_, AppState>,
     input: CreateRevisionInput,
-) -> AppResult<RevisionRow> {
+) -> AppResult<CreateRevisionResult> {
     create_revision_inner(&state, input).await
 }
 
 pub async fn create_revision_inner(
     state: &AppState,
     input: CreateRevisionInput,
-) -> AppResult<RevisionRow> {
+) -> AppResult<CreateRevisionResult> {
     let code = input.revision_code.trim().to_string();
     if code.is_empty() {
         return Err(AppError::msg("El código de revisión es obligatorio"));
@@ -2290,11 +2326,26 @@ pub async fn create_revision_inner(
 
     let source_doc = fetch_document(state, &input.document_id).await?;
     let cat_key = source_doc.category_key.as_deref().unwrap_or("");
-    if !crate::doc_revisions::category_uses_revisions(cat_key) {
+    if !crate::doc_revisions::category_supports_revisions(cat_key) {
         return Err(AppError::msg(
-            "Emitir revisión solo aplica a memorias y planos (modelos usan solo _vNN)",
+            "Emitir revisión aplica a memorias, planos y modelos",
         ));
     }
+    let is_model = cat_key == "modelos";
+    let also_model = input.also_create_model_revision.unwrap_or(false) && !is_model;
+
+    // Resolve model sources early so we fail before creating the doc revision.
+    let spawn_model_ids = if also_model {
+        crate::model_revisions::resolve_source_model_ids(
+            state,
+            &source_doc,
+            input.source_model_document_ids.as_deref(),
+            true,
+        )
+        .await?
+    } else {
+        Vec::new()
+    };
 
     let source_version_id = input
         .document_version_id
@@ -2324,8 +2375,8 @@ pub async fn create_revision_inner(
     // Collect working files to freeze + copy into the new revision document.
     let mut sources: Vec<(PathBuf, Option<String>)> = Vec::new();
     if freeze_linked {
-        let linked: Vec<(String, String, Option<String>)> = sqlx::query_as(
-            "SELECT id, relative_path, format_label FROM document_files
+        let linked: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT id, relative_path, format_label, file_role FROM document_files
              WHERE document_version_id = ? AND is_available = 1
                AND relative_path NOT LIKE '%/.ingmanager/snapshots/%'
                AND relative_path NOT LIKE '%.ingmanager/snapshots/%'",
@@ -2334,11 +2385,21 @@ pub async fn create_revision_inner(
         .fetch_all(&state.pool)
         .await?;
 
-        for (_fid, rel, label) in linked {
+        for (_fid, rel, label, role) in linked {
             let abs = match crate::path_security::join_under_root(&loc.root_path, &rel) {
                 Ok(p) if p.is_file() => p,
                 _ => continue,
             };
+            if is_model {
+                let name = abs
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
+                if !crate::model_revisions::is_model_revision_source_file(name, role.as_deref())
+                {
+                    continue;
+                }
+            }
             sources.push((abs, label));
         }
     }
@@ -2512,18 +2573,45 @@ pub async fn create_revision_inner(
         ));
     }
 
+    // Opt-in: spawn aligned model revision(s) with the same `_R` + `_v01`.
+    let mut spawned_model_document_ids = Vec::new();
+    for model_id in &spawn_model_ids {
+        match crate::model_revisions::spawn_model_revision(
+            state,
+            model_id,
+            &code,
+            Some(&new_doc_id),
+            input.notes.as_deref(),
+            into_folders,
+        )
+        .await
+        {
+            Ok(spawned) => spawned_model_document_ids.push(spawned.document_id),
+            Err(e) => {
+                // Doc revision already committed; surface partial failure clearly.
+                return Err(AppError::msg(format!(
+                    "Revisión de documento creada ({new_doc_id}), pero falló el modelo desde {model_id}: {e}"
+                )));
+            }
+        }
+    }
+
     crate::audit::log_event(
         &state.pool,
         Some(&source_doc.project_id),
         "document",
         Some(&new_doc_id),
         "create_revision_document",
-        Some(&format!("Revisión {code} desde {}", input.document_id)),
+        Some(&format!(
+            "Revisión {code} desde {}; modelos={}",
+            input.document_id,
+            spawned_model_document_ids.len()
+        )),
     )
     .await
     .ok();
 
-    sqlx::query_as::<_, RevisionRow>(
+    let row = sqlx::query_as::<_, RevisionRow>(
         "SELECT id, document_id, revision_code, issued_at, notes, created_at,
                 document_version_id, status
          FROM revisions WHERE id = ?",
@@ -2531,7 +2619,12 @@ pub async fn create_revision_inner(
     .bind(rev_id)
     .fetch_one(&state.pool)
     .await
-    .map_err(AppError::from)
+    .map_err(AppError::from)?;
+
+    Ok(CreateRevisionResult::from_row(
+        row,
+        spawned_model_document_ids,
+    ))
 }
 
 #[tauri::command]

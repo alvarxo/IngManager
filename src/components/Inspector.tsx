@@ -63,11 +63,56 @@ export function Inspector() {
     },
   });
 
+  const foldersFlagMutation = useMutation({
+    mutationFn: (enabled: boolean) =>
+      api.updateProject({
+        id: projectId!,
+        physical_revision_folders: enabled,
+      }),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["project", projectId] });
+      await qc.invalidateQueries({ queryKey: ["projects"] });
+    },
+  });
+
+  const reorgPreviewMutation = useMutation({
+    mutationFn: () => api.previewRevisionFolderReorg(projectId!),
+    onSuccess: (data) => {
+      setReorgError(null);
+      setReorgResult(null);
+      setReorgPreview(data);
+    },
+    onError: (e: Error) => {
+      setReorgPreview(null);
+      setReorgError(String(e));
+    },
+  });
+
+  const reorgApplyMutation = useMutation({
+    mutationFn: () =>
+      api.applyRevisionFolderReorg(projectId!, reorgPreview!.session_id),
+    onSuccess: async (data) => {
+      setReorgResult(
+        `Movidos: ${data.moved} · Omitidos: ${data.skipped} · Fallidos: ${data.failed}`,
+      );
+      setReorgPreview(null);
+      await qc.invalidateQueries({ queryKey: ["project", projectId] });
+      await qc.invalidateQueries({ queryKey: ["documents"] });
+      await qc.invalidateQueries({ queryKey: ["category-files"] });
+    },
+    onError: (e: Error) => setReorgError(String(e)),
+  });
+
   const [editingProject, setEditingProject] = useState(false);
   const [editName, setEditName] = useState("");
   const [editClient, setEditClient] = useState("");
   const [editDescription, setEditDescription] = useState("");
   const [projectMetaError, setProjectMetaError] = useState<string | null>(null);
+  const [reorgPreview, setReorgPreview] = useState<
+    Awaited<ReturnType<typeof api.previewRevisionFolderReorg>> | null
+  >(null);
+  const [reorgError, setReorgError] = useState<string | null>(null);
+  const [reorgResult, setReorgResult] = useState<string | null>(null);
 
   const projectMetaMutation = useMutation({
     mutationFn: () =>
@@ -268,6 +313,87 @@ export function Inspector() {
                       >
                         Desarchivar
                       </Button>
+                    )}
+                  </div>
+
+                  <div className="space-y-2 border-t border-border pt-3">
+                    <div className="text-[11px] uppercase text-muted">
+                      Carpetas por revisión
+                    </div>
+                    <label className="flex items-start gap-2 text-[12.5px]">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5"
+                        checked={project.data.physical_revision_folders === 1}
+                        disabled={foldersFlagMutation.isPending}
+                        onChange={(e) =>
+                          foldersFlagMutation.mutate(e.target.checked)
+                        }
+                      />
+                      <span>
+                        Reorganizar por carpetas de revisión
+                        <span className="mt-0.5 block text-[11px] text-muted">
+                          Nuevas emisiones →{" "}
+                          <span className="font-mono">CATEGORIA/RA/</span> (modelos:{" "}
+                          <span className="font-mono">v01/</span>). No mueve
+                          archivos existentes.
+                        </span>
+                      </span>
+                    </label>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={reorgPreviewMutation.isPending}
+                      onClick={() => reorgPreviewMutation.mutate()}
+                    >
+                      Reorganizar archivos…
+                    </Button>
+                    {reorgError && (
+                      <div className="border border-error/40 bg-error/10 px-2 py-1.5 text-[12px] text-error">
+                        {reorgError}
+                      </div>
+                    )}
+                    {reorgResult && (
+                      <p className="text-[12px] text-muted">{reorgResult}</p>
+                    )}
+                    {reorgPreview && (
+                      <div className="space-y-2 border border-border bg-elevated p-2 text-[12px]">
+                        <p>
+                          Vista previa:{" "}
+                          <strong>{reorgPreview.to_move}</strong> a mover,{" "}
+                          {reorgPreview.skipped} omitidos.
+                        </p>
+                        <ul className="max-h-[160px] space-y-1 overflow-auto font-mono text-[11px]">
+                          {reorgPreview.items
+                            .filter((i) => i.action !== "skip")
+                            .slice(0, 40)
+                            .map((i) => (
+                              <li key={i.document_file_id}>
+                                {i.source_relative_path} →{" "}
+                                {i.dest_relative_path}
+                              </li>
+                            ))}
+                        </ul>
+                        <div className="flex flex-wrap gap-1">
+                          <Button
+                            size="sm"
+                            disabled={
+                              reorgApplyMutation.isPending ||
+                              reorgPreview.to_move === 0
+                            }
+                            onClick={() => reorgApplyMutation.mutate()}
+                          >
+                            Aplicar movimientos
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => setReorgPreview(null)}
+                          >
+                            Cancelar
+                          </Button>
+                        </div>
+                      </div>
                     )}
                   </div>
                 </div>

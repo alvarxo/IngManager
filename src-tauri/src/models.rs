@@ -18,6 +18,8 @@ pub struct Project {
     pub start_date: Option<String>,
     pub end_date: Option<String>,
     pub is_favorite: i64,
+    /// When 1, new revisiones/versiones write under `CATEGORIA/RA/` (or `vNN/` for modelos).
+    pub physical_revision_folders: i64,
     pub last_opened_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -50,6 +52,8 @@ pub struct UpdateProjectInput {
     pub start_date: Option<String>,
     pub end_date: Option<String>,
     pub is_favorite: Option<bool>,
+    /// Opt-in: physical folders by revision (`RA`/`R0`) for memorias/planos.
+    pub physical_revision_folders: Option<bool>,
 }
 
 /// Result of removing a project registration (SQLite only; files kept).

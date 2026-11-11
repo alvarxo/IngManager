@@ -293,11 +293,16 @@ pub async fn update_project(
         .is_favorite
         .map(|v| if v { 1 } else { 0 })
         .unwrap_or(existing.is_favorite);
+    let physical_revision_folders = input
+        .physical_revision_folders
+        .map(|v| if v { 1 } else { 0 })
+        .unwrap_or(existing.physical_revision_folders);
 
     sqlx::query(
         "UPDATE projects SET
             name = ?, description = ?, client_name = ?, status = ?,
-            start_date = ?, end_date = ?, is_favorite = ?, updated_at = datetime('now')
+            start_date = ?, end_date = ?, is_favorite = ?,
+            physical_revision_folders = ?, updated_at = datetime('now')
          WHERE id = ?",
     )
     .bind(&name)
@@ -307,6 +312,7 @@ pub async fn update_project(
     .bind(&start_date)
     .bind(&end_date)
     .bind(is_favorite)
+    .bind(physical_revision_folders)
     .bind(&input.id)
     .execute(&state.pool)
     .await?;
@@ -340,6 +346,7 @@ pub async fn archive_project(state: State<'_, AppState>, id: String) -> AppResul
             start_date: None,
             end_date: None,
             is_favorite: None,
+            physical_revision_folders: None,
         },
     )
     .await

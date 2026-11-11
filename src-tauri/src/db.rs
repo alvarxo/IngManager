@@ -102,6 +102,13 @@ async fn run_migrations(pool: &SqlitePool) -> AppResult<()> {
         include_str!("../migrations/009_model_subtypes.sql"),
     )
     .await?;
+    apply_migration(
+        pool,
+        10,
+        "010_physical_revision_folders",
+        include_str!("../migrations/010_physical_revision_folders.sql"),
+    )
+    .await?;
 
     Ok(())
 }

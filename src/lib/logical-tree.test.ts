@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  categoryShowsRevisionColumn,
+  categorySupportsRevisions,
   categoryUsesRevisions,
   expandedSetToRecord,
   formatChipLabel,
@@ -20,6 +22,8 @@ describe("logical-tree helpers", () => {
     expect(categoryUsesRevisions("memorias")).toBe(true);
     expect(categoryUsesRevisions("planos")).toBe(true);
     expect(categoryUsesRevisions("modelos")).toBe(false);
+    expect(categoryShowsRevisionColumn("modelos")).toBe(true);
+    expect(categorySupportsRevisions("modelos")).toBe(true);
   });
 
   it("applies expand policy", () => {

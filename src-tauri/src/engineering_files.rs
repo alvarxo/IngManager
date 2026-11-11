@@ -570,8 +570,9 @@ where
 }
 
 /// Build the next working filename for a physical copy: `{base}_v{n:02}{ext}`.
-/// Preserves revision suffix when present: `Memo_RA_v01.docx` → `Memo_RA_v02.docx`.
-/// Modelos (no `_R`): `1126 - MODELO_v01.sdb` → `1126 - MODELO_v02.sdb`.
+/// Preserves revision suffix when present: `Memo_RA_v01.docx` → `Memo_RA_v02.docx`,
+/// `Modelo_RB_v01.sdb` → `Modelo_RB_v02.sdb`. Legacy modelos without `_R`:
+/// `1126 - MODELO_v01.sdb` → `1126 - MODELO_v02.sdb`.
 pub fn next_working_filename(current_file_name: &str, next_version_number: i64) -> String {
     let path = Path::new(current_file_name);
     let stem = raw_stem(current_file_name);
@@ -731,6 +732,10 @@ mod tests {
         assert_eq!(
             next_working_filename("Memo_RA_v01.docx", 2),
             "Memo_RA_v02.docx"
+        );
+        assert_eq!(
+            next_working_filename("1126-SAP-001_RB_v01.sdb", 2),
+            "1126-SAP-001_RB_v02.sdb"
         );
         assert_eq!(
             next_working_filename("1126-MC-002_R0.docx", 1),

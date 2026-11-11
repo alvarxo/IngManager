@@ -285,6 +285,7 @@ async fn test_c_middle_level_rev_vs_version() {
     assert!(category_uses_revisions("memorias"));
     assert!(category_uses_revisions("planos"));
     assert!(!category_uses_revisions("modelos"));
+    assert!(crate::doc_revisions::category_supports_revisions("modelos"));
 
     let dir = tempdir().unwrap();
     let pool = db::init_pool(&dir.path().join("t.db")).await.unwrap();

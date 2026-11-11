@@ -13,6 +13,7 @@ const RELATION_TYPES = [
   "relacionado",
   "deriva_de",
   "revision_de",
+  "modelo_de",
   "reemplaza",
   "referencia",
   "anexo",
@@ -185,6 +186,8 @@ export function DocumentInspector() {
   const d = doc.data;
   const isPlanosOrMemorias =
     d.category_key === "planos" || d.category_key === "memorias";
+  const isModelos = d.category_key === "modelos";
+  const supportsRevisions = isPlanosOrMemorias || isModelos;
 
   return (
     <div className="flex h-full flex-col">
@@ -192,7 +195,10 @@ export function DocumentInspector() {
         {(
           [
             ["doc-detail", "Detalle"],
-            ["doc-versions", isPlanosOrMemorias ? "Versiones / Rev." : "Versiones"],
+            [
+              "doc-versions",
+              supportsRevisions ? "Versiones / Rev." : "Versiones",
+            ],
             ["doc-related", "Relacionados"],
           ] as const
         ).map(([id, label]) => (
@@ -732,17 +738,30 @@ export function DocumentInspector() {
                 </Button>
               )}
 
-            {isPlanosOrMemorias && (
+            {supportsRevisions && (
               <>
                 <div className="pt-2 text-[11px] font-semibold uppercase text-muted">
                   Revisión (_R…) vs versión (_vNN)
                 </div>
                 <p className="text-[11px] text-muted">
-                  Emitir crea otro documento con archivos{" "}
-                  <span className="font-mono">_R{"{código}"}_v01</span>. La
-                  siguiente versión interna dentro de esta revisión usa{" "}
-                  <span className="font-mono">_v02</span> sin cambiar{" "}
-                  <span className="font-mono">_R</span>.
+                  {isModelos ? (
+                    <>
+                      Emitir crea otro modelo con{" "}
+                      <span className="font-mono">_R{"{código}"}_v01.sdb</span>.
+                      La vía habitual es emitir desde la memoria/plano hermano
+                      (opt-in). Versiones internas:{" "}
+                      <span className="font-mono">_RB_v02</span>…
+                    </>
+                  ) : (
+                    <>
+                      Emitir crea otro documento con archivos{" "}
+                      <span className="font-mono">_R{"{código}"}_v01</span>.
+                      Opcionalmente genera el modelo hermano con la misma
+                      revisión. Versión interna:{" "}
+                      <span className="font-mono">_v02</span> sin cambiar{" "}
+                      <span className="font-mono">_R</span>.
+                    </>
+                  )}
                 </p>
                 {d.current_revision_code && (
                   <p className="text-[12px]">
@@ -798,23 +817,98 @@ export function DocumentInspector() {
                     size="sm"
                     onClick={async () => {
                       const code = window.prompt(
-                        "Nueva revisión → nuevo documento con archivo _R{código}_v01.\nCódigo (A→B borrador; 0→1→2 emitida). Congela formatos vinculados.",
+                        isModelos
+                          ? "Nueva revisión de modelo → _R{código}_v01.sdb (nuevo documento).\nCódigo (A→B borrador; 0→1→2 emitida)."
+                          : "Nueva revisión → nuevo documento con archivo _R{código}_v01.\nCódigo (A→B borrador; 0→1→2 emitida). Congela formatos vinculados.",
                       );
                       if (!code) return;
-                      const addMore = window.confirm(
-                        "¿Agregar archivos extra además de congelar los vinculados?\nCancelar = solo congelar vinculados.",
-                      );
+
+                      let alsoModel = false;
+                      let sourceModelIds: string[] | null = null;
+                      if (isPlanosOrMemorias) {
+                        alsoModel = window.confirm(
+                          "¿También crear modelo de esta revisión?\n(_R{código}_v01.sdb alineado)\nCancelar = solo documento.",
+                        );
+                        if (alsoModel) {
+                          try {
+                            const models = await api.listDocuments(
+                              d.project_id,
+                              "modelos",
+                              true,
+                            );
+                            const related = await api.listDocumentRelationships(
+                              documentId,
+                            );
+                            const linkedIds = new Set<string>();
+                            for (const r of related) {
+                              if (
+                                r.relation_type !== "modelo_de" &&
+                                r.relation_type !== "relacionado"
+                              ) {
+                                continue;
+                              }
+                              const other =
+                                r.source_document_id === documentId
+                                  ? r.target_document_id
+                                  : r.source_document_id;
+                              if (models.some((m) => m.id === other)) {
+                                linkedIds.add(other);
+                              }
+                            }
+                            const candidates =
+                              linkedIds.size > 0
+                                ? models.filter((m) => linkedIds.has(m.id))
+                                : models;
+                            if (candidates.length === 0) {
+                              window.alert(
+                                "No hay modelos en el proyecto. Se emitirá solo el documento.",
+                              );
+                              alsoModel = false;
+                            } else if (candidates.length === 1) {
+                              sourceModelIds = [candidates[0].id];
+                            } else {
+                              const lines = candidates
+                                .map(
+                                  (m, i) =>
+                                    `${i + 1}. ${m.business_code ?? "—"} ${m.title}`,
+                                )
+                                .join("\n");
+                              const pick = window.prompt(
+                                `Varios modelos — indique el número (1–${candidates.length}):\n${lines}`,
+                              );
+                              const idx = pick ? Number.parseInt(pick, 10) - 1 : -1;
+                              if (idx < 0 || idx >= candidates.length) {
+                                window.alert(
+                                  "Selección inválida. Se emitirá solo el documento.",
+                                );
+                                alsoModel = false;
+                              } else {
+                                sourceModelIds = [candidates[idx].id];
+                              }
+                            }
+                          } catch (e) {
+                            window.alert(String(e));
+                            return;
+                          }
+                        }
+                      }
+
                       let paths: string[] = [];
-                      if (addMore) {
-                        const picked = await open({
-                          multiple: true,
-                          title: "Formatos adicionales (PDF, DOCX, …)",
-                        });
-                        paths = !picked
-                          ? []
-                          : Array.isArray(picked)
-                            ? picked
-                            : [picked];
+                      if (!isModelos) {
+                        const addMore = window.confirm(
+                          "¿Agregar archivos extra además de congelar los vinculados?\nCancelar = solo congelar vinculados.",
+                        );
+                        if (addMore) {
+                          const picked = await open({
+                            multiple: true,
+                            title: "Formatos adicionales (PDF, DOCX, …)",
+                          });
+                          paths = !picked
+                            ? []
+                            : Array.isArray(picked)
+                              ? picked
+                              : [picked];
+                        }
                       }
                       try {
                         const rev = await api.createRevision({
@@ -828,12 +922,18 @@ export function DocumentInspector() {
                             const ext = p.split(".").pop()?.toUpperCase();
                             return ext ?? "FILE";
                           }),
+                          also_create_model_revision: alsoModel,
+                          source_model_document_ids: sourceModelIds,
                         });
                         await qc.invalidateQueries({ queryKey: ["documents"] });
                         await qc.invalidateQueries({
                           queryKey: ["doc-related"],
                         });
-                        // Abrir el documento de la nueva revisión (_R…_v01).
+                        if (rev.spawned_model_document_ids?.length) {
+                          window.alert(
+                            `Revisión emitida. Modelo(s) creado(s): ${rev.spawned_model_document_ids.length}.`,
+                          );
+                        }
                         setSelectedDocumentId(rev.document_id);
                         await qc.invalidateQueries({
                           queryKey: ["document", rev.document_id],

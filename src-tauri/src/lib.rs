@@ -44,6 +44,9 @@ mod model_types;
 #[cfg(test)]
 mod model_subtypes_codes_tests;
 mod derived_models;
+mod model_revisions;
+#[cfg(test)]
+mod model_revision_parity_tests;
 #[cfg(test)]
 mod derived_models_tests;
 mod models;

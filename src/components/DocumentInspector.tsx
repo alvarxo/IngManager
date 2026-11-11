@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
 const RELATION_TYPES = [
   "relacionado",
   "deriva_de",
+  "revision_de",
   "reemplaza",
   "referencia",
   "anexo",
@@ -734,11 +735,18 @@ export function DocumentInspector() {
             {isPlanosOrMemorias && (
               <>
                 <div className="pt-2 text-[11px] font-semibold uppercase text-muted">
-                  Revisiones (borrador / emitida)
+                  Revisión (_R…) vs versión (_vNN)
                 </div>
+                <p className="text-[11px] text-muted">
+                  Emitir crea otro documento con archivos{" "}
+                  <span className="font-mono">_R{"{código}"}_v01</span>. La
+                  siguiente versión interna dentro de esta revisión usa{" "}
+                  <span className="font-mono">_v02</span> sin cambiar{" "}
+                  <span className="font-mono">_R</span>.
+                </p>
                 {d.current_revision_code && (
                   <p className="text-[12px]">
-                    Actual:{" "}
+                    Revisión de este documento:{" "}
                     <span className="font-mono text-accent">
                       {d.current_revision_code}
                     </span>{" "}
@@ -749,6 +757,15 @@ export function DocumentInspector() {
                         : "borrador"}
                       )
                     </span>
+                    {d.current_version_label && (
+                      <>
+                        {" "}
+                        · versión{" "}
+                        <span className="font-mono">
+                          {d.current_version_label}
+                        </span>
+                      </>
+                    )}
                   </p>
                 )}
                 {(revisions.data?.length ?? 0) === 0 && (
@@ -781,7 +798,7 @@ export function DocumentInspector() {
                     size="sm"
                     onClick={async () => {
                       const code = window.prompt(
-                        "Código de revisión (A→B borrador; 0→1→2 emitida). Congela formatos vinculados.",
+                        "Nueva revisión → nuevo documento con archivo _R{código}_v01.\nCódigo (A→B borrador; 0→1→2 emitida). Congela formatos vinculados.",
                       );
                       if (!code) return;
                       const addMore = window.confirm(
@@ -800,7 +817,7 @@ export function DocumentInspector() {
                             : [picked];
                       }
                       try {
-                        await api.createRevision({
+                        const rev = await api.createRevision({
                           document_id: documentId,
                           revision_code: code,
                           issued_at: new Date().toISOString().slice(0, 10),
@@ -812,16 +829,21 @@ export function DocumentInspector() {
                             return ext ?? "FILE";
                           }),
                         });
+                        await qc.invalidateQueries({ queryKey: ["documents"] });
                         await qc.invalidateQueries({
-                          queryKey: ["doc-revisions", documentId],
+                          queryKey: ["doc-related"],
+                        });
+                        // Abrir el documento de la nueva revisión (_R…_v01).
+                        setSelectedDocumentId(rev.document_id);
+                        await qc.invalidateQueries({
+                          queryKey: ["document", rev.document_id],
+                        });
+                        await qc.invalidateQueries({
+                          queryKey: ["doc-revisions", rev.document_id],
                         });
                         await qc.invalidateQueries({
                           queryKey: ["doc-version-files"],
                         });
-                        await qc.invalidateQueries({
-                          queryKey: ["document", documentId],
-                        });
-                        await qc.invalidateQueries({ queryKey: ["documents"] });
                       } catch (e) {
                         window.alert(String(e));
                       }

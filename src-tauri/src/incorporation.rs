@@ -233,11 +233,11 @@ fn title_from_group(files: &[PathBuf]) -> String {
         .and_then(|p| p.file_stem())
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "Documento".into());
-    let (identity, _) = crate::doc_revisions::strip_revision_suffix(&stem);
-    if identity.trim().is_empty() {
+    let parsed = crate::doc_revisions::parse_compound_stem(&stem);
+    if parsed.identity_stem.trim().is_empty() {
         stem
     } else {
-        identity
+        parsed.identity_stem
     }
 }
 

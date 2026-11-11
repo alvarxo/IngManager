@@ -246,7 +246,7 @@ fn revision_sequence_a_b_0_1_2() {
     assert_eq!(c, vec!["A", "B", "0", "1", "2"]);
 }
 
-/// Emitir revisión freezes linked formats into snapshots; refuses empty.
+/// Emitir revisión: nuevo documento + freeze + archivos `_R0_v01`; refuses empty.
 #[tokio::test]
 async fn emitir_freezes_linked_formats_no_empty() {
     let dir = tempdir().unwrap();
@@ -318,6 +318,8 @@ async fn emitir_freezes_linked_formats_no_empty() {
     .unwrap();
     assert_eq!(rev.revision_code, "0");
     assert_eq!(rev.status.as_deref(), Some("issued"));
+    // Nueva revisión ⇒ otro documento (mismo código base).
+    assert_ne!(rev.document_id, doc_id, "emit spawns a new document");
 
     let snaps: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM document_files
@@ -328,6 +330,47 @@ async fn emitir_freezes_linked_formats_no_empty() {
     .await
     .unwrap();
     assert!(snaps.0 >= 2, "freeze linked formats as snapshots");
+
+    let working: Vec<(String,)> = sqlx::query_as(
+        "SELECT file_name FROM document_files
+         WHERE document_version_id = ? AND is_available = 1
+           AND relative_path NOT LIKE '%snapshots%'",
+    )
+    .bind(rev.document_version_id.as_ref().unwrap())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let names: Vec<&str> = working.iter().map(|(n,)| n.as_str()).collect();
+    assert!(
+        names.iter().any(|n| n.contains("_R0_v01")),
+        "working copy must carry _R0_v01, got {names:?}"
+    );
+    assert!(mem.join("Memo_R0_v01.docx").is_file());
+    assert!(mem.join("Memo_R0_v01.pdf").is_file());
+
+    // Same business_code on source and new revision document.
+    let codes: Vec<(Option<String>,)> = sqlx::query_as(
+        "SELECT business_code FROM documents WHERE id IN (?, ?)",
+    )
+    .bind(&doc_id)
+    .bind(&rev.document_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(codes.len(), 2);
+    assert_eq!(codes[0].0, codes[1].0);
+
+    let rel: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM document_relationships
+         WHERE source_document_id = ? AND target_document_id = ?
+           AND relation_type = 'revision_de'",
+    )
+    .bind(&rev.document_id)
+    .bind(&doc_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rel.0, 1);
 }
 
 /// Repair: mis-assigned v01/v02/v03 from RB/R0 files → revisions.

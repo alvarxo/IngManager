@@ -2,6 +2,9 @@
 //!
 //! Filename patterns (`_RA`, `_RB`, `_R0`, `_RevA`, …) are **revisions**, not
 //! internal working versions (`_v01`). Sequence: A → B → 0 → 1 → 2.
+//!
+//! Combined physical naming (memorias/planos): `{identity}_R{code}_v{NN}{ext}`
+//! e.g. `1126-MC-002_RA_v01.docx`. Modelos SAP keep `_vNN` only (no `_R`).
 
 use std::path::Path;
 
@@ -14,6 +17,15 @@ pub struct ParsedRevision {
     pub revision_code: String,
     /// True for letter codes (draft); false for numeric (emitted).
     pub is_draft: bool,
+}
+
+/// Compound stem: identity + optional revision + optional `_vNN` version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedCompoundStem {
+    pub identity_stem: String,
+    pub revision: Option<ParsedRevision>,
+    /// Numeric version from `_vNN` / `-vN` only (not `_RA` / `_RevA`).
+    pub version_number: Option<u32>,
 }
 
 /// Strip a revision suffix from a stem. Returns `(identity, Some(parsed))` or `(stem, None)`.
@@ -42,6 +54,110 @@ pub fn strip_revision_suffix(stem: &str) -> (String, Option<ParsedRevision>) {
     }
 
     (stem.to_string(), None)
+}
+
+/// Strip only `_vNN` / `-vN` (digits). Does **not** treat `_RA` / `_RevA` as versions.
+pub fn strip_vnn_suffix(stem: &str) -> (String, Option<u32>) {
+    let stem = stem.trim();
+    if stem.is_empty() {
+        return (String::new(), None);
+    }
+    if let Some(idx) = stem.rfind(['_', '-']) {
+        let base = stem[..idx].trim();
+        let suffix = &stem[idx + 1..];
+        if !base.is_empty() && !suffix.is_empty() {
+            let suf_l = suffix.to_ascii_lowercase();
+            if let Some(num) = suf_l.strip_prefix('v') {
+                if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) {
+                    if let Ok(n) = num.parse::<u32>() {
+                        return (base.to_string(), Some(n));
+                    }
+                }
+            }
+        }
+    }
+    (stem.to_string(), None)
+}
+
+/// Parse identity + revision + `_vNN` in stable order (version outermost, then revision).
+/// `Doc_RA_v01` → identity `Doc`, rev `A`, version `1`.
+pub fn parse_compound_stem(stem: &str) -> ParsedCompoundStem {
+    let stem = stem.trim();
+    let (without_v, version_number) = strip_vnn_suffix(stem);
+    let (identity, revision) = strip_revision_suffix(&without_v);
+    let identity = if identity.is_empty() {
+        without_v.clone()
+    } else {
+        identity
+    };
+    let revision = revision.map(|mut r| {
+        r.identity_stem = identity.clone();
+        r
+    });
+    ParsedCompoundStem {
+        identity_stem: identity,
+        revision,
+        version_number,
+    }
+}
+
+/// Filename token for a revision code: `A` → `RA`, `0` → `R0`.
+pub fn format_revision_token(code: &str) -> String {
+    let c = code.trim();
+    if c.is_empty() {
+        return String::new();
+    }
+    if c.chars().all(|ch| ch.is_ascii_digit()) {
+        format!("R{c}")
+    } else {
+        format!("R{}", c.to_ascii_uppercase())
+    }
+}
+
+/// Build `{identity}_R{code}_v{NN}` (omit missing parts). Revision before version.
+pub fn build_compound_stem(
+    identity: &str,
+    revision_code: Option<&str>,
+    version_number: Option<i64>,
+) -> String {
+    let mut s = identity.trim().to_string();
+    if let Some(code) = revision_code.map(str::trim).filter(|c| !c.is_empty()) {
+        let token = format_revision_token(code);
+        if !token.is_empty() {
+            s = format!("{s}_{token}");
+        }
+    }
+    if let Some(n) = version_number {
+        let n = if n < 1 { 1 } else { n };
+        s = format!("{s}_v{n:02}");
+    }
+    s
+}
+
+/// Rebuild a file name with a new revision + version, preserving extension.
+/// Strips prior `_R*` / `_vNN` from the stem first.
+pub fn apply_revision_version_filename(
+    current_file_name: &str,
+    revision_code: &str,
+    version_number: i64,
+) -> String {
+    let path = Path::new(current_file_name);
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| current_file_name.to_string());
+    let parsed = parse_compound_stem(&stem);
+    let identity = if parsed.identity_stem.is_empty() {
+        stem
+    } else {
+        parsed.identity_stem
+    };
+    let new_stem = build_compound_stem(&identity, Some(revision_code), Some(version_number));
+    let ext = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    format!("{new_stem}{ext}")
 }
 
 /// Parse a lone revision token: `RA`, `RB`, `R0`, `RevA`, `Rev.B`, `rev02`, `A`, `0`.
@@ -212,5 +328,39 @@ mod unit_tests {
             revision_identity_key("1126-MC-002_RB.docx"),
             revision_identity_key("1126-MC-002_R0.pdf")
         );
+    }
+
+    #[test]
+    fn compound_ra_v01_and_build() {
+        let p = parse_compound_stem("1126-MC-002_RA_v01");
+        assert_eq!(p.identity_stem, "1126-MC-002");
+        assert_eq!(p.revision.as_ref().map(|r| r.revision_code.as_str()), Some("A"));
+        assert_eq!(p.version_number, Some(1));
+        assert_eq!(
+            build_compound_stem("1126-MC-002", Some("A"), Some(1)),
+            "1126-MC-002_RA_v01"
+        );
+        assert_eq!(
+            build_compound_stem("1126-MC-002", Some("0"), Some(2)),
+            "1126-MC-002_R0_v02"
+        );
+        assert_eq!(
+            apply_revision_version_filename("Memo_RA_v03.docx", "B", 1),
+            "Memo_RB_v01.docx"
+        );
+        assert_eq!(
+            apply_revision_version_filename("Memo.docx", "A", 1),
+            "Memo_RA_v01.docx"
+        );
+    }
+
+    #[test]
+    fn strip_vnn_does_not_eat_ra() {
+        let (base, ver) = strip_vnn_suffix("Doc_RA");
+        assert!(ver.is_none());
+        assert_eq!(base, "Doc_RA");
+        let (base2, ver2) = strip_vnn_suffix("Doc_RA_v02");
+        assert_eq!(base2, "Doc_RA");
+        assert_eq!(ver2, Some(2));
     }
 }

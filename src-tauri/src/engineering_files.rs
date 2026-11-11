@@ -169,9 +169,10 @@ pub fn strip_project_code_prefix(name: &str, project_codes: &[String]) -> String
     rest
 }
 
-/// Strip Save-As / revision suffixes that are versions, not identity.
-/// Examples: `_v01`, `-v2`, `_revB`, ` (2)`, ` - Copy`, `_copia3`.
-/// Does **not** touch SIN/CON CAMIONES (or similar) wording.
+/// Strip Save-As suffixes that are **internal versions**, not identity.
+/// Examples: `_v01`, `-v2`, ` (2)`, ` - Copy`, `_copia3`.
+/// Does **not** strip `_RA` / `_R0` / `_RevA` (those are formal revisions — see
+/// `doc_revisions`). Does **not** touch SIN/CON CAMIONES wording.
 pub fn strip_version_suffix(stem: &str) -> (String, Option<String>) {
     let stem = stem.trim();
     if stem.is_empty() {
@@ -211,27 +212,11 @@ pub fn strip_version_suffix(stem: &str) -> (String, Option<String>) {
         if !base.is_empty() && !suffix.is_empty() {
             let suf_l = suffix.to_lowercase();
 
-            // v01 / v1
+            // v01 / v1 only — never `_RA` / `_RevB` (revisions).
             if suf_l.starts_with('v') {
                 let num = &suf_l[1..];
                 if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) {
                     return (base.to_string(), Some(num.to_string()));
-                }
-            }
-
-            // revA / rev.B / rev02
-            if let Some(rest) = suf_l.strip_prefix("rev") {
-                let rest = rest.trim_start_matches('.');
-                if !rest.is_empty()
-                    && rest.len() <= 4
-                    && rest.chars().all(|c| c.is_ascii_alphanumeric())
-                {
-                    let raw = suffix;
-                    let hint = raw
-                        .get(3..)
-                        .map(|r| r.trim_start_matches('.').to_string())
-                        .unwrap_or_else(|| rest.to_string());
-                    return (base.to_string(), Some(hint));
                 }
             }
 
@@ -273,7 +258,8 @@ pub fn version_hint_from_name(file_name: &str) -> Option<String> {
 }
 
 /// Normalize a group identity: lowercase, collapse whitespace, keep SIN/CON wording.
-/// Version suffixes (`_v01`, `_revA`, …) are **not** part of identity.
+/// Version suffixes (`_v01`, …) are **not** part of identity. Revision tokens
+/// (`_RA`, `_RevA`) are left in place (use `doc_revisions` to strip those).
 pub fn normalize_group_key(stem: &str, project_codes: &[String]) -> String {
     let stripped = strip_project_code_prefix(stem, project_codes);
     // Also strip a leading AANN-looking code even if not in the list
@@ -584,21 +570,41 @@ where
 }
 
 /// Build the next working filename for a physical copy: `{base}_v{n:02}{ext}`.
-/// Uses `strip_version_suffix` so `1126 - MODELO_v01.sdb` → `1126 - MODELO_v02.sdb`.
+/// Preserves revision suffix when present: `Memo_RA_v01.docx` → `Memo_RA_v02.docx`.
+/// Modelos (no `_R`): `1126 - MODELO_v01.sdb` → `1126 - MODELO_v02.sdb`.
 pub fn next_working_filename(current_file_name: &str, next_version_number: i64) -> String {
     let path = Path::new(current_file_name);
     let stem = raw_stem(current_file_name);
-    let (base, _) = strip_version_suffix(&stem);
-    let base = if base.is_empty() { stem } else { base };
-    let ext = path
-        .extension()
-        .map(|e| format!(".{}", e.to_string_lossy()))
-        .unwrap_or_default();
     let n = if next_version_number < 1 {
         1
     } else {
         next_version_number
     };
+    let ext = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+
+    // Prefer compound parse so `_RA` / `_R0` stay when bumping `_vNN`.
+    let compound = crate::doc_revisions::parse_compound_stem(&stem);
+    if compound.revision.is_some() || compound.version_number.is_some() {
+        let rev = compound
+            .revision
+            .as_ref()
+            .map(|r| r.revision_code.as_str());
+        let identity = if compound.identity_stem.is_empty() {
+            stem.as_str()
+        } else {
+            compound.identity_stem.as_str()
+        };
+        let new_stem =
+            crate::doc_revisions::build_compound_stem(identity, rev, Some(n));
+        return format!("{new_stem}{ext}");
+    }
+
+    // Legacy Save-As patterns: `(2)`, `- Copy`, `_revB` as version-ish strip.
+    let (base, _) = strip_version_suffix(&stem);
+    let base = if base.is_empty() { stem } else { base };
     format!("{base}_v{n:02}{ext}")
 }
 
@@ -732,6 +738,14 @@ mod tests {
             "1126 - MODELO_v02.sdb"
         );
         assert_eq!(next_working_filename("Base.sdb", 1), "Base_v01.sdb");
+        assert_eq!(
+            next_working_filename("Memo_RA_v01.docx", 2),
+            "Memo_RA_v02.docx"
+        );
+        assert_eq!(
+            next_working_filename("1126-MC-002_R0.docx", 1),
+            "1126-MC-002_R0_v01.docx"
+        );
     }
 
     #[test]

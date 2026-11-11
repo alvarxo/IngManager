@@ -19,8 +19,8 @@ use std::path::Path;
 use tempfile::tempdir;
 
 use crate::commands::documents::{
-    create_revision_inner, repair_document_revisions_inner, resolve_document_principal_file_id,
-    CreateRevisionInput, RepairRevisionsInput,
+    create_revision_inner, get_document_inner, repair_document_revisions_inner,
+    resolve_document_principal_file_id, CreateRevisionInput, RepairRevisionsInput,
 };
 use crate::db;
 use crate::doc_revisions::{cmp_revision_codes, parse_revision_filename, strip_revision_suffix};
@@ -229,14 +229,108 @@ fn recognizes_ra_rb_r0_reva_patterns() {
         ("x_RA.docx", "A", true),
         ("x_RB.pdf", "B", true),
         ("x_R0.docx", "0", false),
+        ("x_R1.docx", "1", false),
         ("x_RevA.docx", "A", true),
         ("plano_Rev.B.dwg", "B", true),
+        // Compound naming (#20): `_R` before `_vNN`
+        ("1133_3-000-MC-0001_RB_v01.docx", "B", true),
+        ("Doc_RA_v02.pdf", "A", true),
+        ("Doc_R0_v01.docx", "0", false),
     ] {
         let p = parse_revision_filename(name).expect(name);
         assert_eq!(p.revision_code, code);
         assert_eq!(p.is_draft, draft);
     }
     assert!(strip_revision_suffix("MODELO_v01").1.is_none());
+    assert!(parse_revision_filename("Doc_v01.docx").is_none());
+}
+
+/// Column «Revisión (_R)»: derive from working filename even with no `revisions` row.
+#[tokio::test]
+async fn current_revision_from_compound_filename_without_db_row() {
+    let dir = tempdir().unwrap();
+    let pool = db::init_pool(&dir.path().join("t.db")).await.unwrap();
+    let root = dir.path().join("root");
+    let mem = root.join("1133/04_MEMORIAS");
+    fs::create_dir_all(&mem).unwrap();
+    let root_id = setup_root(&pool, &root).await;
+    let pid = seed_project(&pool, &root_id, Some("1133"), "1133").await;
+
+    let cat: (String,) =
+        sqlx::query_as("SELECT id FROM categories WHERE project_id = ? AND key = 'memorias'")
+            .bind(&pid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let doc_id = uuid::Uuid::new_v4().to_string();
+    let vid = uuid::Uuid::new_v4().to_string();
+
+    sqlx::query(
+        "INSERT INTO documents (
+            id, project_id, category_id, business_code, title, doc_type,
+            current_version_id, status, created_at, updated_at
+         ) VALUES (?, ?, ?, '1133_3-MC-001', '1133_3-000-MC-0001', 'MC', ?, 'desarrollo',
+                   datetime('now'), datetime('now'))",
+    )
+    .bind(&doc_id)
+    .bind(&pid)
+    .bind(&cat.0)
+    .bind(&vid)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO document_versions (
+            id, document_id, version_number, label, created_at, is_snapshot
+         ) VALUES (?, ?, 1, 'v01', datetime('now'), 0)",
+    )
+    .bind(&vid)
+    .bind(&doc_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    for (name, ext) in [
+        ("1133_3-000-MC-0001_RB_v01.docx", "docx"),
+        ("1133_3-000-MC-0001_RB_v01.pdf", "pdf"),
+    ] {
+        let abs = mem.join(name);
+        fs::write(&abs, b"x").unwrap();
+        let rel = format!("1133/04_MEMORIAS/{name}");
+        sqlx::query(
+            "INSERT INTO document_files (
+                id, document_version_id, relative_path, file_name, extension,
+                is_available, created_at
+             ) VALUES (?, ?, ?, ?, ?, 1, datetime('now'))",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&vid)
+        .bind(&rel)
+        .bind(name)
+        .bind(ext)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let rev_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM revisions WHERE document_id = ?")
+            .bind(&doc_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rev_count.0, 0, "fixture has no registered revisions");
+
+    let state = AppState::new(pool.clone(), dir.path().join("t.db"));
+    let doc = get_document_inner(&state, &doc_id).await.unwrap();
+    assert_eq!(
+        doc.current_revision_code.as_deref(),
+        Some("B"),
+        "column must show B from …_RB_v01 even without revisions row"
+    );
+    assert_eq!(doc.current_revision_status.as_deref(), Some("draft"));
+    assert_eq!(doc.current_version_label.as_deref(), Some("v01"));
 }
 
 #[test]

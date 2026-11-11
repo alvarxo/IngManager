@@ -346,6 +346,11 @@ async fn enrich_change_flags(
 }
 
 /// Fill `current_revision_*` using engineering sequence A→B→0→1→2 (latest wins).
+///
+/// Source of truth for display: physical `_R{token}` on current working files
+/// (e.g. `…_RB_v01.docx` → `B`), even when no row exists in `revisions`.
+/// Registered revision rows still contribute (merged); status prefers the DB
+/// row when the chosen code was emitted/registered.
 async fn enrich_current_revisions(
     state: &AppState,
     mut docs: Vec<DocumentRow>,
@@ -353,6 +358,8 @@ async fn enrich_current_revisions(
     if docs.is_empty() {
         return Ok(docs);
     }
+    use std::collections::HashMap;
+
     let ids: Vec<String> = docs.iter().map(|d| d.id.clone()).collect();
     let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql = format!(
@@ -363,22 +370,79 @@ async fn enrich_current_revisions(
         q = q.bind(id);
     }
     let rows = q.fetch_all(&state.pool).await?;
-    use std::collections::HashMap;
     let mut by_doc: HashMap<String, Vec<(String, Option<String>)>> = HashMap::new();
     for (doc_id, code, status) in rows {
         by_doc.entry(doc_id).or_default().push((code, status));
     }
-    for doc in &mut docs {
-        if let Some(list) = by_doc.get_mut(&doc.id) {
-            list.sort_by(|a, b| crate::doc_revisions::cmp_revision_codes(&a.0, &b.0));
-            if let Some((code, status)) = list.last() {
-                doc.current_revision_code = Some(code.clone());
-                doc.current_revision_status = Some(
-                    status
-                        .clone()
-                        .unwrap_or_else(|| crate::doc_revisions::status_for_code(code).to_string()),
-                );
+
+    // Filename tokens from current-version working files (memorias/planos).
+    let version_ids: Vec<String> = docs
+        .iter()
+        .filter(|d| {
+            crate::doc_revisions::category_uses_revisions(d.category_key.as_deref().unwrap_or(""))
+        })
+        .filter_map(|d| d.current_version_id.clone())
+        .collect();
+    let mut file_codes_by_version: HashMap<String, Vec<String>> = HashMap::new();
+    if !version_ids.is_empty() {
+        let v_placeholders = version_ids
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        let file_sql = format!(
+            "SELECT document_version_id, file_name FROM document_files
+             WHERE document_version_id IN ({v_placeholders}) AND is_available = 1"
+        );
+        let mut fq = sqlx::query_as::<_, (String, String)>(&file_sql);
+        for vid in &version_ids {
+            fq = fq.bind(vid);
+        }
+        let file_rows = fq.fetch_all(&state.pool).await?;
+        for (vid, name) in file_rows {
+            if let Some(parsed) = crate::doc_revisions::parse_revision_filename(&name) {
+                file_codes_by_version
+                    .entry(vid)
+                    .or_default()
+                    .push(parsed.revision_code);
             }
+        }
+    }
+
+    for doc in &mut docs {
+        let cat = doc.category_key.as_deref().unwrap_or("");
+        let uses_rev = crate::doc_revisions::category_uses_revisions(cat);
+
+        let mut candidates: Vec<(String, Option<String>)> =
+            by_doc.remove(&doc.id).unwrap_or_default();
+
+        if uses_rev {
+            if let Some(vid) = doc.current_version_id.as_deref() {
+                if let Some(codes) = file_codes_by_version.get(vid) {
+                    for code in codes {
+                        // Keep DB status when the same code is already registered.
+                        if !candidates.iter().any(|(c, _)| c == code) {
+                            candidates.push((
+                                code.clone(),
+                                Some(crate::doc_revisions::status_for_code(code).to_string()),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        if candidates.is_empty() {
+            continue;
+        }
+        candidates.sort_by(|a, b| crate::doc_revisions::cmp_revision_codes(&a.0, &b.0));
+        if let Some((code, status)) = candidates.last() {
+            doc.current_revision_code = Some(code.clone());
+            doc.current_revision_status = Some(
+                status
+                    .clone()
+                    .unwrap_or_else(|| crate::doc_revisions::status_for_code(code).to_string()),
+            );
         }
     }
     Ok(docs)
@@ -461,8 +525,13 @@ pub async fn list_documents(
 
 #[tauri::command]
 pub async fn get_document(state: State<'_, AppState>, id: String) -> AppResult<DocumentRow> {
-    let doc = fetch_document(&state, &id).await?;
-    Ok(enrich_documents(&state, vec![doc])
+    get_document_inner(&state, &id).await
+}
+
+/// Enriched document row (revision from DB + current working filenames).
+pub async fn get_document_inner(state: &AppState, id: &str) -> AppResult<DocumentRow> {
+    let doc = fetch_document(state, id).await?;
+    Ok(enrich_documents(state, vec![doc])
         .await?
         .into_iter()
         .next()

@@ -1,28 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { LeftSidebar } from "./LeftSidebar";
-
-vi.mock("@/lib/api", () => ({
-  api: {
-    listProjects: vi.fn(async () => []),
-    listAuthorizedRoots: vi.fn(async () => []),
-    getAppSetting: vi.fn(async () => null),
-    setAppSetting: vi.fn(async () => undefined),
-    openProject: vi.fn(async () => undefined),
-  },
-}));
-
-function renderSidebar() {
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  return render(
-    <QueryClientProvider client={client}>
-      <LeftSidebar />
-    </QueryClientProvider>,
-  );
-}
 
 describe("LeftSidebar", () => {
   beforeEach(() => {
@@ -34,27 +12,32 @@ describe("LeftSidebar", () => {
     vi.useRealTimers();
   });
 
-  it("starts collapsed with hamburger and hides project panel", () => {
-    renderSidebar();
+  it("starts collapsed with hamburger and hides navigation drawer", () => {
+    render(<LeftSidebar />);
     const toggle = screen.getByRole("button", {
-      name: /anclar panel de proyectos/i,
+      name: /anclar navegación/i,
     });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     const regionId = toggle.getAttribute("aria-controls");
     expect(regionId).toBeTruthy();
     const region = document.getElementById(regionId!);
     expect(region).toHaveAttribute("aria-hidden", "true");
-    expect(region).toHaveAttribute("aria-label", "Proyectos");
-    expect(screen.getByLabelText("Inicio")).toBeInTheDocument();
+    expect(region).toHaveAttribute("aria-label", "Navegación");
+    // Labeled entries exist in the DOM but are hidden until hover/pin.
+    expect(screen.getByText("Inicio")).toBeInTheDocument();
+    expect(screen.getByText("Bandeja")).toBeInTheDocument();
+    expect(screen.getByText("Ajustes")).toBeInTheDocument();
   });
 
   it("opens on hover and closes after leave delay", () => {
-    const { container } = renderSidebar();
+    const { container } = render(<LeftSidebar />);
     const root = container.firstElementChild as HTMLElement;
     const toggle = screen.getByRole("button", {
-      name: /anclar panel de proyectos/i,
+      name: /anclar navegación/i,
     });
-    const region = document.getElementById(toggle.getAttribute("aria-controls")!);
+    const region = document.getElementById(
+      toggle.getAttribute("aria-controls")!,
+    );
 
     fireEvent.mouseEnter(root);
     expect(toggle).toHaveAttribute("aria-expanded", "true");
@@ -74,28 +57,28 @@ describe("LeftSidebar", () => {
   });
 
   it("pins open on click and persists to localStorage", () => {
-    renderSidebar();
+    render(<LeftSidebar />);
     const toggle = screen.getByRole("button", {
-      name: /anclar panel de proyectos/i,
+      name: /anclar navegación/i,
     });
     fireEvent.click(toggle);
     expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(localStorage.getItem("ingmanager_sidebar_pinned")).toBe("1");
+    expect(localStorage.getItem("ingmanager_nav_pinned")).toBe("1");
     expect(
-      screen.getByRole("button", { name: /desanclar panel de proyectos/i }),
+      screen.getByRole("button", { name: /desanclar navegación/i }),
     ).toBeInTheDocument();
 
     fireEvent.click(
-      screen.getByRole("button", { name: /desanclar panel de proyectos/i }),
+      screen.getByRole("button", { name: /desanclar navegación/i }),
     );
-    expect(localStorage.getItem("ingmanager_sidebar_pinned")).toBe("0");
+    expect(localStorage.getItem("ingmanager_nav_pinned")).toBe("0");
   });
 
   it("restores pinned state from localStorage", () => {
-    localStorage.setItem("ingmanager_sidebar_pinned", "1");
-    renderSidebar();
+    localStorage.setItem("ingmanager_nav_pinned", "1");
+    render(<LeftSidebar />);
     expect(
-      screen.getByRole("button", { name: /desanclar panel de proyectos/i }),
+      screen.getByRole("button", { name: /desanclar navegación/i }),
     ).toHaveAttribute("aria-expanded", "true");
   });
 });

@@ -346,6 +346,22 @@ pub async fn resolve_project_location(
     pool: &SqlitePool,
     project_id: &str,
 ) -> AppResult<ProjectLocation> {
+    resolve_project_location_inner(pool, project_id, true).await
+}
+
+/// Resolve without canonicalize / existence probes — safe for open/list hot paths.
+pub async fn resolve_project_location_light(
+    pool: &SqlitePool,
+    project_id: &str,
+) -> AppResult<ProjectLocation> {
+    resolve_project_location_inner(pool, project_id, false).await
+}
+
+async fn resolve_project_location_inner(
+    pool: &SqlitePool,
+    project_id: &str,
+    touch_fs: bool,
+) -> AppResult<ProjectLocation> {
     let row: (String, Option<String>, String, String, String) = sqlx::query_as(
         "SELECT p.id, p.code, p.root_relative_path, p.authorized_root_id, r.absolute_path
          FROM projects p
@@ -359,12 +375,22 @@ pub async fn resolve_project_location(
 
     let (id, code, rel, root_id, root_abs) = row;
     let root_path = PathBuf::from(&root_abs);
-    if !root_path.is_dir() {
-        return Err(AppError::msg(format!(
-            "La raíz autorizada del proyecto no es accesible: {root_abs}"
-        )));
-    }
-    let absolute_path = join_under_root(&root_path, &rel)?;
+    let absolute_path = if touch_fs {
+        if !root_path.is_dir() {
+            return Err(AppError::msg(format!(
+                "La raíz autorizada del proyecto no es accesible: {root_abs}"
+            )));
+        }
+        join_under_root(&root_path, &rel)?
+    } else {
+        // No canonicalize / is_dir — listing must not hang on Windows AV / junctions.
+        let cleaned = rel.trim_start_matches(['/', '\\']);
+        if cleaned.is_empty() {
+            root_path.clone()
+        } else {
+            root_path.join(cleaned)
+        }
+    };
     let prefix = business_code_prefix(code.as_deref(), &rel);
     Ok(ProjectLocation {
         project_id: id,

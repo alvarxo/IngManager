@@ -284,6 +284,10 @@ export function ProjectWorkspace({ projectId, categoryKey }: Props) {
 
           {categories.isLoading ? (
             <div className="p-4 text-muted">Cargando categorías…</div>
+          ) : categories.error ? (
+            <div className="p-4 text-error">
+              Error al cargar categorías: {String(categories.error)}
+            </div>
           ) : activeKey ? (
             projectContentMode === "documents" ? (
               <DocumentBrowser projectId={projectId} categoryKey={activeKey} />

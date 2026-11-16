@@ -109,7 +109,10 @@ pub async fn list_projects(
 
 #[tauri::command]
 pub async fn get_project(state: State<'_, AppState>, id: String) -> AppResult<Project> {
-    fetch_project(&state, &id).await
+    crate::diagnostics::log_event("project", &format!("get begin id={id}"));
+    let p = fetch_project(&state, &id).await?;
+    crate::diagnostics::log_event("project", &format!("get done id={id}"));
+    Ok(p)
 }
 
 #[tauri::command]
@@ -399,7 +402,7 @@ pub async fn open_project(state: State<'_, AppState>, id: String) -> AppResult<P
         crate::diagnostics::log_event(
             "open",
             &format!(
-                "returned id={id} (reconcile skipped; enable Settings reconcile_on_open)"
+                "returned id={id} (reconcile skipped; enable Settings reconcile_on_open); next FE: get_project + list_project_categories + list_documents (SQLite-only)"
             ),
         );
         return Ok(project);
@@ -563,6 +566,13 @@ pub async fn list_project_categories(
     state: State<'_, AppState>,
     project_id: String,
 ) -> AppResult<Vec<CategorySummary>> {
+    crate::diagnostics::log_event(
+        "categories",
+        &format!("begin project={project_id}"),
+    );
+    let started = std::time::Instant::now();
+
+    // Pure SQLite — never touch the filesystem on open/list (1090 hang class).
     let mut categories = sqlx::query_as::<_, CategorySummary>(
         "SELECT
             c.key,
@@ -589,25 +599,42 @@ pub async fn list_project_categories(
     .fetch_all(&state.pool)
     .await?;
 
-    // For modelos, count principal engineering groups (not every physical aux file).
+    // Approximate model principals with an extension filter in SQL.
+    // Previously loaded EVERY modelos file_name into RAM and ran count_principals
+    // in-process — OOM/hang risk on huge indexed trees (project 1090).
     if let Some(modelos) = categories.iter_mut().find(|c| c.key == "modelos") {
-        let names: Vec<(String,)> = sqlx::query_as(
-            "SELECT file_name FROM indexed_files
+        let count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM indexed_files
              WHERE project_id = ? AND category_key = 'modelos'
-               AND is_directory = 0 AND is_available = 1",
+               AND is_directory = 0 AND is_available = 1
+               AND lower(COALESCE(extension, '')) IN (
+                    'sdb', 'rvt', 'rfa', 'rtd', 'edb', 'idea', 'xlsx', 'xls'
+               )",
         )
         .bind(&project_id)
-        .fetch_all(&state.pool)
-        .await?;
-        let codes = project_codes_for(&state.pool, &project_id).await?;
-        let file_names: Vec<String> = names.into_iter().map(|r| r.0).collect();
-        modelos.model_count =
-            crate::engineering_files::count_principals(&file_names, &codes) as i64;
+        .fetch_one(&state.pool)
+        .await
+        .unwrap_or((0,));
+        // Prefer principal-ish count; UI falls back to file_count when 0.
+        modelos.model_count = if count.0 > 0 {
+            count.0
+        } else {
+            modelos.file_count
+        };
     }
 
+    crate::diagnostics::log_event(
+        "categories",
+        &format!(
+            "done project={project_id} n={} ms={}",
+            categories.len(),
+            started.elapsed().as_millis()
+        ),
+    );
     Ok(categories)
 }
 
+#[allow(dead_code)]
 async fn project_codes_for(pool: &sqlx::SqlitePool, project_id: &str) -> AppResult<Vec<String>> {
     let row: Option<(Option<String>, String)> =
         sqlx::query_as("SELECT code, root_relative_path FROM projects WHERE id = ?")

@@ -7,6 +7,7 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { MoreHorizontal, Plus, Star } from "lucide-react";
 import { api } from "@/lib/api";
+import { openProjectSafe } from "@/lib/open-project";
 import type { Project } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui-store";
@@ -110,15 +111,17 @@ export function ProjectList({ onBusyChange }: ProjectListProps) {
 
   async function openProject(project: Project) {
     setActionError(null);
+    // Navigate immediately so the workspace stays responsive while open finishes.
     setView({ kind: "project", projectId: project.id });
-    try {
-      await api.openProject(project.id);
-    } catch (e) {
+    const result = await openProjectSafe(project.id);
+    if (!result.ok) {
       setActionError(
-        `No se pudo completar la apertura de ${project.code ?? project.name}: ${String(e)}`,
+        `No se pudo completar la apertura de ${project.code ?? project.name}: ${result.error}`,
       );
     }
     await qc.invalidateQueries({ queryKey: ["recent-projects"] });
+    await qc.invalidateQueries({ queryKey: ["categories", project.id] });
+    await qc.invalidateQueries({ queryKey: ["project", project.id] });
   }
 
   function openMenuAt(project: Project, x: number, y: number) {

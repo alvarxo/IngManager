@@ -270,19 +270,6 @@ async fn project_business_prefix(state: &AppState, project_id: &str) -> AppResul
     Ok(loc.business_code_prefix)
 }
 
-fn fingerprint(path: &Path) -> AppResult<String> {
-    let meta = fs::metadata(path)?;
-    let modified = meta
-        .modified()
-        .ok()
-        .and_then(|t| {
-            let dt: DateTime<Utc> = t.into();
-            Some(dt.to_rfc3339())
-        })
-        .unwrap_or_default();
-    Ok(format!("{}:{}", meta.len(), modified))
-}
-
 fn to_rfc3339(time: SystemTime) -> Option<String> {
     let dt: DateTime<Utc> = time.into();
     Some(dt.to_rfc3339())
@@ -340,34 +327,59 @@ async fn enrich_change_flags(
     state: &AppState,
     mut docs: Vec<DocumentRow>,
 ) -> AppResult<Vec<DocumentRow>> {
+    // List path must stay light: metadata only, no content hashing / canonicalize-per-file.
+    // Heavy projects (e.g. 1090) previously hung or OOMed when list_documents hashed bodies.
+    use std::collections::HashMap;
+
+    let mut loc_cache: HashMap<String, crate::project_paths::ProjectLocation> = HashMap::new();
     for doc in &mut docs {
         if let Some(vid) = &doc.current_version_id {
-            let loc = match loc_for_document(state, &doc.id).await {
-                Ok(l) => l,
-                Err(_) => continue,
+            let loc = if let Some(l) = loc_cache.get(&doc.project_id) {
+                l.clone()
+            } else {
+                match loc_for_document(state, &doc.id).await {
+                    Ok(l) => {
+                        loc_cache.insert(doc.project_id.clone(), l.clone());
+                        l
+                    }
+                    Err(_) => continue,
+                }
             };
-            let files: Vec<(String, Option<String>)> = sqlx::query_as(
-                "SELECT relative_path, content_hash FROM document_files
+            let files: Vec<(String, Option<i64>, Option<String>)> = sqlx::query_as(
+                "SELECT relative_path, size_bytes, modified_at FROM document_files
                  WHERE document_version_id = ? AND is_available = 1",
             )
             .bind(vid)
             .fetch_all(&state.pool)
             .await?;
             let mut changed = false;
-            for (rel, hash) in files {
-                let abs = match crate::path_security::join_under_root(&loc.root_path, &rel) {
-                    Ok(p) => p,
-                    Err(_) => {
+            for (rel, size_bytes, modified_at) in files {
+                // Join without re-canonicalizing every file (spaces / `\\?\` safe).
+                let abs = loc.root_path.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+                if !path_is_under_relaxed(&loc.root_path, &abs) {
+                    changed = true;
+                    break;
+                }
+                let meta = match fs::metadata(&abs) {
+                    Ok(m) if m.is_file() => m,
+                    _ => {
                         changed = true;
                         break;
                     }
                 };
-                if !abs.exists() {
-                    changed = true;
-                    break;
+                if let Some(reg_size) = size_bytes {
+                    if meta.len() as i64 != reg_size {
+                        changed = true;
+                        break;
+                    }
                 }
-                if let Some(registered) = hash {
-                    if fingerprint(&abs).unwrap_or_default() != registered {
+                if let Some(reg_mtime) = modified_at.as_deref() {
+                    let live = meta
+                        .modified()
+                        .ok()
+                        .and_then(to_rfc3339)
+                        .unwrap_or_default();
+                    if !live.is_empty() && live != reg_mtime {
                         changed = true;
                         break;
                     }
@@ -377,6 +389,22 @@ async fn enrich_change_flags(
         }
     }
     Ok(docs)
+}
+
+fn path_is_under_relaxed(root: &Path, candidate: &Path) -> bool {
+    let root_s = root.to_string_lossy().replace('/', "\\").to_ascii_lowercase();
+    let cand_s = candidate
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase();
+    let strip = |s: &str| {
+        s.trim_start_matches(r#"\\?\"#)
+            .trim_start_matches(r#"//?/"#)
+            .to_string()
+    };
+    let r = strip(&root_s);
+    let c = strip(&cand_s);
+    c == r || c.starts_with(&(r.clone() + "\\")) || c.starts_with(&(r + "/"))
 }
 
 /// Fill `current_revision_*` using engineering sequence A→B→0→1→2 (latest wins).

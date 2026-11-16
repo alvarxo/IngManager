@@ -184,3 +184,10 @@ pub async fn update_authorized_root_label(
 ) -> AppResult<AuthorizedRoot> {
     project_paths::update_authorized_root_label(&state.pool, &root_id, &label).await
 }
+
+#[tauri::command]
+pub async fn open_diagnostics_folder() -> AppResult<String> {
+    let dir = crate::diagnostics::diagnostics_dir()?;
+    open::that(&dir).map_err(|e| AppError::msg(format!("No se pudo abrir diagnósticos: {e}")))?;
+    Ok(dir.display().to_string())
+}

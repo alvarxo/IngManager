@@ -1,12 +1,15 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Star, Clock } from "lucide-react";
 import { api } from "@/lib/api";
+import { openProjectSafe } from "@/lib/open-project";
 import { useUiStore } from "@/stores/ui-store";
 
 export function HomeView() {
   const setView = useUiStore((s) => s.setView);
   const setSelectedDocumentId = useUiStore((s) => s.setSelectedDocumentId);
   const setInspectorTab = useUiStore((s) => s.setInspectorTab);
+  const [openError, setOpenError] = useState<string | null>(null);
 
   const recent = useQuery({
     queryKey: ["recent-projects"],
@@ -21,6 +24,15 @@ export function HomeView() {
     queryFn: () => api.listFavoriteDocuments(null),
   });
 
+  async function openHomeProject(id: string, label: string) {
+    setOpenError(null);
+    setView({ kind: "project", projectId: id });
+    const result = await openProjectSafe(id);
+    if (!result.ok) {
+      setOpenError(`No se pudo completar la apertura de ${label}: ${result.error}`);
+    }
+  }
+
   return (
     <div className="flex h-full flex-col overflow-auto bg-bg p-6">
       <div className="mb-6">
@@ -28,6 +40,9 @@ export function HomeView() {
         <p className="text-[13px] text-muted">
           Acceso rápido a proyectos recientes y favoritos.
         </p>
+        {openError && (
+          <p className="mt-2 text-[12.5px] text-error">{openError}</p>
+        )}
       </div>
 
       <section className="mb-8">
@@ -52,10 +67,9 @@ export function HomeView() {
                 <tr
                   key={p.id}
                   className="h-[40px] cursor-pointer border-b border-border/50 hover:bg-elevated"
-                  onClick={async () => {
-                    await api.openProject(p.id);
-                    setView({ kind: "project", projectId: p.id });
-                  }}
+                  onClick={() =>
+                    void openHomeProject(p.id, p.code ?? p.name)
+                  }
                 >
                   <td className="px-2 font-mono text-accent">{p.code ?? "—"}</td>
                   <td className="px-2">{p.name}</td>
@@ -82,10 +96,9 @@ export function HomeView() {
                 <button
                   type="button"
                   className="flex h-[40px] w-full items-center gap-3 rounded-[var(--radius-sm)] px-2 hover:bg-elevated"
-                  onClick={async () => {
-                    await api.openProject(p.id);
-                    setView({ kind: "project", projectId: p.id });
-                  }}
+                  onClick={() =>
+                    void openHomeProject(p.id, p.code ?? p.name)
+                  }
                 >
                   <span className="font-mono text-accent">{p.code ?? "—"}</span>
                   <span>{p.name}</span>

@@ -150,6 +150,7 @@ export const api = {
   startInitialIndex: () => invoke<void>("start_initial_index"),
   reindexRoot: () => invoke<void>("reindex_root"),
   startFileWatcher: () => invoke<void>("start_file_watcher"),
+  openDiagnosticsFolder: () => invoke<string>("open_diagnostics_folder"),
 
   listDirectory: (absolutePath: string) =>
     invoke<FsEntry[]>("list_directory", { absolutePath }),

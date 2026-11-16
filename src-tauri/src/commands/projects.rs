@@ -354,26 +354,110 @@ pub async fn archive_project(state: State<'_, AppState>, id: String) -> AppResul
 
 #[tauri::command]
 pub async fn open_project(state: State<'_, AppState>, id: String) -> AppResult<Project> {
-    let project = fetch_project(&state, &id).await?;
+    crate::diagnostics::log_event("open", &format!("begin id={id}"));
+    let project = match fetch_project(&state, &id).await {
+        Ok(p) => p,
+        Err(e) => {
+            crate::diagnostics::log_event("open", &format!("missing id={id}: {e}"));
+            return Err(e);
+        }
+    };
 
     // Timestamp update must not block a successful open.
-    let _ = sqlx::query(
+    if let Err(e) = sqlx::query(
         "UPDATE projects SET last_opened_at = datetime('now'), updated_at = datetime('now')
          WHERE id = ?",
     )
     .bind(&id)
     .execute(&state.pool)
-    .await;
+    .await
+    {
+        crate::diagnostics::log_event("open", &format!("timestamp update failed id={id}: {e}"));
+    }
+
+    // Repair empty category rows (linked projects) without touching disk.
+    if let Err(e) = ensure_standard_categories_if_empty(&state.pool, &id).await {
+        crate::diagnostics::log_event(
+            "open",
+            &format!("ensure categories failed id={id}: {e}"),
+        );
+    }
 
     // Heavy reconcile must never block open (OOM/hang risk on large projects like 1090).
-    // Fingerprint is now bounded; reconcile still walks the tree so keep it background.
+    let gen = state.begin_open_reconcile();
     let pool = state.pool.clone();
+    let cancel = state.open_reconcile_cancel.clone();
+    let gen_cell = state.open_reconcile_generation.clone();
     let project_id = id.clone();
+    let folder_label = project.root_relative_path.clone();
     tokio::spawn(async move {
-        let _ = crate::auto_version::reconcile_project(&pool, &project_id).await;
+        crate::diagnostics::log_event(
+            "reconcile",
+            &format!("start project={project_id} folder={folder_label} gen={gen}"),
+        );
+        match crate::auto_version::reconcile_project_cancelable(
+            &pool,
+            &project_id,
+            Some(cancel.as_ref()),
+            Some((gen_cell.as_ref(), gen)),
+        )
+        .await
+        {
+            Ok(results) => {
+                crate::diagnostics::log_event(
+                    "reconcile",
+                    &format!(
+                        "done project={project_id} gen={gen} results={}",
+                        results.len()
+                    ),
+                );
+            }
+            Err(e) => {
+                crate::diagnostics::log_event(
+                    "reconcile",
+                    &format!("error project={project_id} gen={gen}: {e}"),
+                );
+            }
+        }
     });
 
+    crate::diagnostics::log_event("open", &format!("returned id={id} (reconcile background)"));
     Ok(project)
+}
+
+/// If a project has zero category rows, seed STANDARD_FOLDERS (DB only — no disk walk).
+pub(crate) async fn ensure_standard_categories_if_empty(
+    pool: &sqlx::SqlitePool,
+    project_id: &str,
+) -> AppResult<()> {
+    let count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM categories WHERE project_id = ?")
+            .bind(project_id)
+            .fetch_one(pool)
+            .await?;
+    if count.0 > 0 {
+        return Ok(());
+    }
+    for folder in STANDARD_FOLDERS {
+        let cat_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT OR IGNORE INTO categories (id, project_id, key, name, relative_path, sort_order)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&cat_id)
+        .bind(project_id)
+        .bind(folder.key)
+        .bind(folder.name)
+        .bind(folder.relative_path)
+        .bind(folder.sort_order)
+        .execute(pool)
+        .await?;
+    }
+    crate::diagnostics::log_event(
+        "open",
+        &format!("seeded standard categories for project={project_id}"),
+    );
+    Ok(())
 }
 
 /// Expected confirmation token for remove: business code, else folder name.

@@ -133,31 +133,44 @@ pub fn wait_until_stable(path: &Path, settle: Duration, max_wait: Duration) -> b
     path.is_file()
 }
 
-pub fn fingerprint_meta(path: &Path) -> AppResult<(String, u64, Option<String>)> {
-    use std::io::{Read, Seek, SeekFrom};
+/// Max bytes sampled from a file for fingerprinting (head).
+pub const FINGERPRINT_HEAD_MAX: usize = 4096;
+/// Max bytes sampled from a file for fingerprinting (tail).
+pub const FINGERPRINT_TAIL_MAX: usize = 1024;
 
+/// Cheap metadata used to skip content sampling when size+mtime are unchanged.
+pub fn file_size_mtime(path: &Path) -> AppResult<(u64, Option<String>)> {
     let meta = fs::metadata(path)?;
     let size = meta.len();
     let modified = meta.modified().ok().and_then(|t| {
         let dt: DateTime<Utc> = t.into();
         Some(dt.to_rfc3339())
     });
+    Ok((size, modified))
+}
+
+pub fn fingerprint_meta(path: &Path) -> AppResult<(String, u64, Option<String>)> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let (size, modified) = file_size_mtime(path)?;
     let mut hasher = Sha256::new();
     hasher.update(size.to_le_bytes());
     if let Some(ref m) = modified {
         hasher.update(m.as_bytes());
     }
+    // Prefer lossy display over panicking on odd Windows `\\?\` / space paths.
     hasher.update(path.to_string_lossy().as_bytes());
 
     // Never read the whole file into memory — large engineering models (GB)
     // previously caused OOM crashes during open reconcile (e.g. project 1090).
     if let Ok(mut file) = fs::File::open(path) {
-        let mut head = vec![0u8; 4096.min(size as usize)];
+        let head_len = FINGERPRINT_HEAD_MAX.min(size as usize);
+        let mut head = vec![0u8; head_len];
         if let Ok(n) = file.read(&mut head) {
             hasher.update(&head[..n]);
         }
-        if size > 4096 {
-            let tail_len = 1024u64.min(size);
+        if size > FINGERPRINT_HEAD_MAX as u64 {
+            let tail_len = (FINGERPRINT_TAIL_MAX as u64).min(size);
             let start = size.saturating_sub(tail_len);
             if file.seek(SeekFrom::Start(start)).is_ok() {
                 let mut tail = vec![0u8; tail_len as usize];
@@ -234,16 +247,34 @@ pub async fn process_path(
     }
 
     let abs_str = absolute_path.display().to_string();
-    let (fp, size, modified) = fingerprint_meta(absolute_path)?;
 
     let project_id = match find_project_for_path(pool, absolute_path).await? {
         Some(id) => id,
         None => return Ok(None),
     };
 
-    if let Some((track_id, last_fp, doc_id, ver_id)) =
-        load_tracking(pool, &project_id, &abs_str).await?
-    {
+    // Cheap size+mtime short-circuit before sampling file content (1090 reopen).
+    let (meta_size, meta_mtime) = file_size_mtime(absolute_path)?;
+    let existing = load_tracking(pool, &project_id, &abs_str).await?;
+    if let Some((track_id, last_fp, doc_id, ver_id, last_size, last_mtime)) = &existing {
+        if *last_size == Some(meta_size as i64) && last_mtime.as_deref() == meta_mtime.as_deref()
+        {
+            let _ = track_id;
+            let _ = last_fp;
+            return Ok(Some(AutoVersionResult {
+                path: abs_str,
+                action: "unchanged".into(),
+                document_id: Some(doc_id.clone()),
+                version_id: ver_id.clone(),
+                pending_id: None,
+                message: "Sin cambios de contenido".into(),
+            }));
+        }
+    }
+
+    let (fp, size, modified) = fingerprint_meta(absolute_path)?;
+
+    if let Some((track_id, last_fp, doc_id, ver_id, _last_size, _last_mtime)) = existing {
         if last_fp.as_deref() == Some(fp.as_str()) {
             return Ok(Some(AutoVersionResult {
                 path: abs_str,
@@ -372,9 +403,26 @@ async fn load_tracking(
     pool: &SqlitePool,
     project_id: &str,
     abs: &str,
-) -> AppResult<Option<(String, Option<String>, String, Option<String>)>> {
-    let row: Option<(String, Option<String>, String, Option<String>)> = sqlx::query_as(
-        "SELECT id, last_fingerprint, document_id, document_version_id
+) -> AppResult<
+    Option<(
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+    )>,
+> {
+    let row: Option<(
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+    )> = sqlx::query_as(
+        "SELECT id, last_fingerprint, document_id, document_version_id,
+                last_size_bytes, last_modified_at
          FROM file_version_tracking
          WHERE project_id = ? AND absolute_path = ?",
     )
@@ -383,6 +431,14 @@ async fn load_tracking(
     .fetch_optional(pool)
     .await?;
     Ok(row)
+}
+
+fn normalize_path_key(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('/', "\\")
+        .trim_start_matches(r#"\\?\"#)
+        .trim_start_matches(r#"//?/"#)
+        .to_ascii_lowercase()
 }
 
 async fn find_project_for_path(pool: &SqlitePool, path: &Path) -> AppResult<Option<String>> {
@@ -395,11 +451,16 @@ async fn find_project_for_path(pool: &SqlitePool, path: &Path) -> AppResult<Opti
     .fetch_all(pool)
     .await?;
 
+    let path_key = normalize_path_key(path);
     let mut best: Option<(usize, String)> = None;
     for (id, root, rel) in projects {
         let proj = PathBuf::from(&root).join(&rel);
-        if path.starts_with(&proj) {
-            let len = proj.as_os_str().len();
+        let proj_key = normalize_path_key(&proj);
+        if path_key == proj_key
+            || path_key.starts_with(&(proj_key.clone() + "\\"))
+            || path_key.starts_with(&(proj_key.clone() + "/"))
+        {
+            let len = proj_key.len();
             if best.as_ref().map(|(l, _)| len > *l).unwrap_or(true) {
                 best = Some((len, id));
             }
@@ -753,46 +814,128 @@ pub async fn reconcile_project(
     pool: &SqlitePool,
     project_id: &str,
 ) -> AppResult<Vec<AutoVersionResult>> {
+    reconcile_project_cancelable(pool, project_id, None, None).await
+}
+
+/// Cancelable reconcile used by `open_project` so heavy trees cannot hang the UI forever.
+///
+/// `cancel` / `expected_generation` are polled between files so a newer open aborts work.
+/// Per-file errors are logged and skipped — they must not fail (or kill) the process.
+pub async fn reconcile_project_cancelable(
+    pool: &SqlitePool,
+    project_id: &str,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    expected_generation: Option<(&std::sync::atomic::AtomicU64, u64)>,
+) -> AppResult<Vec<AutoVersionResult>> {
+    use std::sync::atomic::Ordering;
+
     let loc = project_paths::resolve_project_location(pool, project_id).await?;
     let mut results = Vec::new();
     if !loc.absolute_path.is_dir() {
         return Ok(results);
     }
-    for entry in walkdir::WalkDir::new(&loc.absolute_path)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if path.components().any(|c| {
-            c.as_os_str()
-                .to_string_lossy()
-                .eq_ignore_ascii_case(".ingmanager")
-        }) {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy();
-        let parsed = parse_version_filename(&name);
-        // Skip aux/.sbk early so reconcile never walks them into versions.
-        if !crate::engineering_files::can_auto_version_extension(parsed.extension.as_deref()) {
-            continue;
-        }
-        if !parsed.is_version_pattern {
-            let tracked: (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM file_version_tracking WHERE project_id = ? AND base_stem = ?",
-            )
-            .bind(project_id)
-            .bind(&parsed.base_stem)
-            .fetch_one(pool)
-            .await?;
-            if tracked.0 == 0 {
+
+    // Known tracked paths (reopen fast path) + walk only version-pattern names.
+    let tracked_paths: Vec<(String,)> = sqlx::query_as(
+        "SELECT absolute_path FROM file_version_tracking WHERE project_id = ?",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let walk_root = loc.absolute_path.clone();
+    let pattern_paths: Vec<PathBuf> = match tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        for entry in walkdir::WalkDir::new(&walk_root)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if !entry.file_type().is_file() {
                 continue;
             }
+            let path = entry.path();
+            if path.components().any(|c| {
+                c.as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(".ingmanager")
+            }) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy();
+            let parsed = parse_version_filename(&name);
+            if !crate::engineering_files::can_auto_version_extension(parsed.extension.as_deref()) {
+                continue;
+            }
+            // Only Save-As / revision patterns from the walk — tracked files come from DB.
+            if parsed.is_version_pattern {
+                out.push(path.to_path_buf());
+            }
         }
-        if let Some(r) = process_path(pool, path).await? {
-            results.push(r);
+        out
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            crate::diagnostics::log_event(
+                "reconcile",
+                &format!("walk join err project={project_id}: {e}"),
+            );
+            Vec::new()
+        }
+    };
+
+    let mut candidates: Vec<PathBuf> = tracked_paths
+        .into_iter()
+        .map(|(p,)| PathBuf::from(p))
+        .filter(|p| p.is_file())
+        .collect();
+    for p in pattern_paths {
+        if !candidates.iter().any(|c| c == &p) {
+            candidates.push(p);
+        }
+    }
+
+    crate::diagnostics::log_event(
+        "reconcile",
+        &format!(
+            "scan project={} folder={} candidates={}",
+            project_id,
+            crate::diagnostics::safe_path_label(&loc.absolute_path),
+            candidates.len()
+        ),
+    );
+
+    let mut scanned: u64 = 0;
+    for path in candidates {
+        let cancelled = cancel.is_some_and(|c| c.load(Ordering::SeqCst))
+            || expected_generation.is_some_and(|(cell, gen)| cell.load(Ordering::SeqCst) != gen);
+        if cancelled {
+            crate::diagnostics::log_event(
+                "reconcile",
+                &format!("cancelled project={project_id} after {scanned} files"),
+            );
+            break;
+        }
+        scanned += 1;
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        match process_path(pool, &path).await {
+            Ok(Some(r)) => results.push(r),
+            Ok(None) => {}
+            Err(e) => {
+                crate::diagnostics::log_event("reconcile", &format!("skip {name}: {e}"));
+            }
+        }
+
+        // Yield so the async runtime can service UI commands / cancel.
+        if scanned % 16 == 0 {
+            tokio::task::yield_now().await;
         }
     }
     Ok(results)

@@ -4,6 +4,7 @@ mod category_mapping;
 mod codes;
 mod commands;
 mod db;
+mod diagnostics;
 #[cfg(test)]
 mod db_tests;
 mod doc_codes;
@@ -23,6 +24,8 @@ mod revision_folders_tests;
 mod model_identity_hotfix_tests;
 #[cfg(test)]
 mod remove_project_hotfix_tests;
+#[cfg(test)]
+mod open_stability_tests;
 mod error;
 #[cfg(test)]
 mod flexibility_tests;
@@ -91,6 +94,7 @@ pub fn run() {
             commands::settings::add_authorized_root,
             commands::settings::remove_authorized_root,
             commands::settings::update_authorized_root_label,
+            commands::settings::open_diagnostics_folder,
             commands::projects::get_project_absolute_path,
             commands::projects::preview_next_project_code,
             commands::projects::list_projects,

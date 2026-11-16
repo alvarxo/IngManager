@@ -229,6 +229,17 @@ export function SettingsView() {
             Reconstruir FTS
           </Button>
           <Button
+            variant="secondary"
+            onClick={() => {
+              void api
+                .openDiagnosticsFolder()
+                .then((dir) => setMsg(`Diagnósticos: ${dir}`))
+                .catch((e: Error) => setMsg(String(e)));
+            }}
+          >
+            Abrir carpeta de diagnósticos
+          </Button>
+          <Button
             onClick={() => backup.mutate()}
             disabled={backup.isPending || !status.data?.root_valid}
           >

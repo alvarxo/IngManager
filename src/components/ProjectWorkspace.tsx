@@ -282,7 +282,9 @@ export function ProjectWorkspace({ projectId, categoryKey }: Props) {
             </ul>
           </div>
 
-          {activeKey ? (
+          {categories.isLoading ? (
+            <div className="p-4 text-muted">Cargando categorías…</div>
+          ) : activeKey ? (
             projectContentMode === "documents" ? (
               <DocumentBrowser projectId={projectId} categoryKey={activeKey} />
             ) : (

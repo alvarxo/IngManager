@@ -21,12 +21,34 @@ export function SettingsView() {
     queryFn: () => api.getLogicalTreeExpandPolicy(),
   });
 
+  const reconcileOnOpen = useQuery({
+    queryKey: ["app-setting", "reconcile_on_open"],
+    queryFn: async () => {
+      const v = await api.getAppSetting("reconcile_on_open");
+      return v === "1" || v === "true";
+    },
+  });
+
   const setTreePolicy = useMutation({
     mutationFn: (policy: LogicalTreeExpandPolicy) =>
       api.setLogicalTreeExpandPolicy(policy),
     onSuccess: async () => {
       await qc.invalidateQueries({ queryKey: ["logical-tree-expand-policy"] });
       setMsg("Política de expansión del árbol de Lógicos actualizada.");
+    },
+    onError: (e: Error) => setMsg(String(e)),
+  });
+
+  const setReconcileOnOpen = useMutation({
+    mutationFn: (enabled: boolean) =>
+      api.setAppSetting("reconcile_on_open", enabled ? "1" : "0"),
+    onSuccess: async () => {
+      await qc.invalidateQueries({
+        queryKey: ["app-setting", "reconcile_on_open"],
+      });
+      setMsg(
+        "Reconcile al abrir actualizado. Por defecto está desactivado (proyectos pesados como 1090).",
+      );
     },
     onError: (e: Error) => setMsg(String(e)),
   });
@@ -213,6 +235,24 @@ export function SettingsView() {
             Reindexar
           </Button>
         </div>
+      </section>
+
+      <section className="mb-6 max-w-2xl border border-border bg-panel p-4">
+        <h2 className="mb-2 text-[13px] font-semibold">Apertura de proyectos</h2>
+        <p className="mb-3 text-[12px] text-muted">
+          El reconcile automático al abrir puede colgar en árboles grandes o con
+          junctions de Windows. Por defecto está desactivado; use «Reconciliar
+          versiones» manual cuando lo necesite.
+        </p>
+        <label className="flex items-center gap-2 text-[13px]">
+          <input
+            type="checkbox"
+            checked={reconcileOnOpen.data ?? false}
+            disabled={reconcileOnOpen.isLoading || setReconcileOnOpen.isPending}
+            onChange={(e) => setReconcileOnOpen.mutate(e.target.checked)}
+          />
+          Reconciliar versiones automáticamente al abrir
+        </label>
       </section>
 
       <section className="mb-6 max-w-2xl border border-border bg-panel p-4">

@@ -809,6 +809,138 @@ pub async fn register_baseline(
     Ok(())
 }
 
+/// Hard caps so Windows junction loops / huge trees cannot hang forever.
+pub const RECONCILE_MAX_WALK_DEPTH: usize = 24;
+pub const RECONCILE_MAX_WALK_ENTRIES: u64 = 25_000;
+/// Soft wall-clock budget for a whole reconcile job (open spawn uses this).
+pub const RECONCILE_TIMEOUT_SECS: u64 = 45;
+
+#[derive(Debug, Clone)]
+pub struct WalkCollectStats {
+    pub entries_seen: u64,
+    pub pattern_files: usize,
+    pub skipped_loops: u64,
+    pub hit_entry_cap: bool,
+    pub hit_depth_cap: bool,
+}
+
+/// Collect Save-As / revision-pattern files under `root` with loop + size guards.
+///
+/// Windows directory junctions are often reported as normal directories (not symlinks),
+/// so `follow_links(false)` alone does **not** prevent infinite walks — we track
+/// visited directory keys and call `skip_current_dir` on repeats.
+pub fn collect_version_pattern_paths(root: &Path) -> (Vec<PathBuf>, WalkCollectStats) {
+    use std::collections::HashSet;
+
+    let mut out = Vec::new();
+    let mut visited_dirs: HashSet<String> = HashSet::new();
+    let mut stats = WalkCollectStats {
+        entries_seen: 0,
+        pattern_files: 0,
+        skipped_loops: 0,
+        hit_entry_cap: false,
+        hit_depth_cap: false,
+    };
+
+    let mut walker = walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .max_depth(RECONCILE_MAX_WALK_DEPTH)
+        .into_iter();
+
+    while let Some(entry) = walker.next() {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                crate::diagnostics::log_event(
+                    "reconcile",
+                    &format!("walk entry err: {e}"),
+                );
+                continue;
+            }
+        };
+
+        stats.entries_seen += 1;
+        if stats.entries_seen % 500 == 0 {
+            crate::diagnostics::log_event(
+                "reconcile",
+                &format!(
+                    "walk progress entries={} patterns={}",
+                    stats.entries_seen,
+                    out.len()
+                ),
+            );
+        }
+        if stats.entries_seen > RECONCILE_MAX_WALK_ENTRIES {
+            stats.hit_entry_cap = true;
+            crate::diagnostics::log_event(
+                "reconcile",
+                &format!(
+                    "walk entry cap {} — aborting further descent",
+                    RECONCILE_MAX_WALK_ENTRIES
+                ),
+            );
+            break;
+        }
+        if entry.depth() >= RECONCILE_MAX_WALK_DEPTH {
+            stats.hit_depth_cap = true;
+        }
+
+        let path = entry.path();
+        if path.components().any(|c| {
+            c.as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(".ingmanager")
+        }) {
+            if entry.file_type().is_dir() {
+                walker.skip_current_dir();
+            }
+            continue;
+        }
+
+        if entry.file_type().is_dir() {
+            // Path-key only — avoid canonicalize-per-dir (Windows AV can stall for seconds).
+            // Junction loops still terminate via max_depth (paths grow: junc/junc/…).
+            let key = normalize_path_key(path);
+            if entry.depth() > 0 && !visited_dirs.insert(key.clone()) {
+                stats.skipped_loops += 1;
+                walker.skip_current_dir();
+                continue;
+            }
+            let _ = visited_dirs.insert(key);
+            continue;
+        }
+
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let name = entry.file_name().to_string_lossy();
+        let parsed = parse_version_filename(&name);
+        if !crate::engineering_files::can_auto_version_extension(parsed.extension.as_deref()) {
+            continue;
+        }
+        if parsed.is_version_pattern {
+            out.push(path.to_path_buf());
+        }
+    }
+
+    stats.pattern_files = out.len();
+    (out, stats)
+}
+
+/// Panic-safe wrapper used from `spawn_blocking` (release builds use `panic=abort`
+/// only for the main binary profile in some setups — still catch_unwind when possible).
+pub fn collect_version_pattern_paths_catch_unwind(
+    root: PathBuf,
+) -> Result<(Vec<PathBuf>, WalkCollectStats), String> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        collect_version_pattern_paths(&root)
+    })) {
+        Ok(v) => Ok(v),
+        Err(_) => Err("walk panicked".into()),
+    }
+}
+
 /// Reconcile auto-versioning for all files under a project (on open).
 pub async fn reconcile_project(
     pool: &SqlitePool,
@@ -829,51 +961,126 @@ pub async fn reconcile_project_cancelable(
 ) -> AppResult<Vec<AutoVersionResult>> {
     use std::sync::atomic::Ordering;
 
-    let loc = project_paths::resolve_project_location(pool, project_id).await?;
+    crate::diagnostics::log_event(
+        "reconcile",
+        &format!("resolve_location begin project={project_id}"),
+    );
+    let loc = match project_paths::resolve_project_location(pool, project_id).await {
+        Ok(l) => l,
+        Err(e) => {
+            crate::diagnostics::log_event(
+                "reconcile",
+                &format!("resolve_location err project={project_id}: {e}"),
+            );
+            return Err(e);
+        }
+    };
     let mut results = Vec::new();
     if !loc.absolute_path.is_dir() {
+        crate::diagnostics::log_event(
+            "reconcile",
+            &format!(
+                "not a dir project={} folder={}",
+                project_id,
+                crate::diagnostics::safe_path_label(&loc.absolute_path)
+            ),
+        );
         return Ok(results);
     }
+    crate::diagnostics::log_event(
+        "reconcile",
+        &format!(
+            "resolve_location ok folder={}",
+            crate::diagnostics::safe_path_label(&loc.absolute_path)
+        ),
+    );
 
-    // Known tracked paths (reopen fast path) + walk only version-pattern names.
+    // Tracked paths only (no WalkDir yet) — cap how many metadata probes we do.
+    crate::diagnostics::log_event("reconcile", "tracked_paths query begin");
     let tracked_paths: Vec<(String,)> = sqlx::query_as(
-        "SELECT absolute_path FROM file_version_tracking WHERE project_id = ?",
+        "SELECT absolute_path FROM file_version_tracking WHERE project_id = ? LIMIT 5000",
     )
     .bind(project_id)
     .fetch_all(pool)
     .await
     .unwrap_or_default();
+    crate::diagnostics::log_event(
+        "reconcile",
+        &format!("tracked_paths query done n={}", tracked_paths.len()),
+    );
 
     let walk_root = loc.absolute_path.clone();
-    let pattern_paths: Vec<PathBuf> = match tokio::task::spawn_blocking(move || {
-        let mut out = Vec::new();
-        for entry in walkdir::WalkDir::new(&walk_root)
-            .follow_links(false)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let path = entry.path();
-            if path.components().any(|c| {
-                c.as_os_str()
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case(".ingmanager")
-            }) {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy();
-            let parsed = parse_version_filename(&name);
-            if !crate::engineering_files::can_auto_version_extension(parsed.extension.as_deref()) {
-                continue;
-            }
-            // Only Save-As / revision patterns from the walk — tracked files come from DB.
-            if parsed.is_version_pattern {
-                out.push(path.to_path_buf());
-            }
+    crate::diagnostics::log_event(
+        "reconcile",
+        &format!(
+            "walk begin folder={} max_depth={} max_entries={}",
+            crate::diagnostics::safe_path_label(&walk_root),
+            RECONCILE_MAX_WALK_DEPTH,
+            RECONCILE_MAX_WALK_ENTRIES
+        ),
+    );
+    let (pattern_paths, walk_stats) = match tokio::task::spawn_blocking(move || {
+        collect_version_pattern_paths_catch_unwind(walk_root)
+    })
+    .await
+    {
+        Ok(Ok((paths, stats))) => (paths, stats),
+        Ok(Err(msg)) => {
+            crate::diagnostics::log_event(
+                "reconcile",
+                &format!("walk catch_unwind project={project_id}: {msg}"),
+            );
+            (
+                Vec::new(),
+                WalkCollectStats {
+                    entries_seen: 0,
+                    pattern_files: 0,
+                    skipped_loops: 0,
+                    hit_entry_cap: false,
+                    hit_depth_cap: false,
+                },
+            )
         }
-        out
+        Err(e) => {
+            crate::diagnostics::log_event(
+                "reconcile",
+                &format!("walk join err project={project_id}: {e}"),
+            );
+            (
+                Vec::new(),
+                WalkCollectStats {
+                    entries_seen: 0,
+                    pattern_files: 0,
+                    skipped_loops: 0,
+                    hit_entry_cap: false,
+                    hit_depth_cap: false,
+                },
+            )
+        }
+    };
+    crate::diagnostics::log_event(
+        "reconcile",
+        &format!(
+            "walk done entries={} patterns={} loops_skipped={} entry_cap={} depth_cap={}",
+            walk_stats.entries_seen,
+            walk_stats.pattern_files,
+            walk_stats.skipped_loops,
+            walk_stats.hit_entry_cap,
+            walk_stats.hit_depth_cap
+        ),
+    );
+
+    // Probe tracked paths off the async runtime (metadata can stall on Windows AV).
+    let tracked_raw: Vec<PathBuf> = tracked_paths
+        .into_iter()
+        .map(|(p,)| PathBuf::from(p))
+        .collect();
+    let tracked_existing: Vec<PathBuf> = match tokio::task::spawn_blocking(move || {
+        tracked_raw
+            .into_iter()
+            .filter(|p| p.is_file())
+            .take(2000)
+            .collect::<Vec<_>>()
     })
     .await
     {
@@ -881,17 +1088,13 @@ pub async fn reconcile_project_cancelable(
         Err(e) => {
             crate::diagnostics::log_event(
                 "reconcile",
-                &format!("walk join err project={project_id}: {e}"),
+                &format!("tracked filter join err: {e}"),
             );
             Vec::new()
         }
     };
 
-    let mut candidates: Vec<PathBuf> = tracked_paths
-        .into_iter()
-        .map(|(p,)| PathBuf::from(p))
-        .filter(|p| p.is_file())
-        .collect();
+    let mut candidates: Vec<PathBuf> = tracked_existing;
     for p in pattern_paths {
         if !candidates.iter().any(|c| c == &p) {
             candidates.push(p);
@@ -925,6 +1128,15 @@ pub async fn reconcile_project_cancelable(
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
 
+        if scanned == 1 || scanned % 8 == 0 {
+            crate::diagnostics::log_event(
+                "reconcile",
+                &format!("process #{scanned} name={name}"),
+            );
+        }
+
+        // Never sample multi-GB bodies on open reconcile — size+mtime short-circuit
+        // inside process_path; still soft-skip any failure.
         match process_path(pool, &path).await {
             Ok(Some(r)) => results.push(r),
             Ok(None) => {}
@@ -933,11 +1145,17 @@ pub async fn reconcile_project_cancelable(
             }
         }
 
-        // Yield so the async runtime can service UI commands / cancel.
-        if scanned % 16 == 0 {
+        if scanned % 8 == 0 {
             tokio::task::yield_now().await;
         }
     }
+    crate::diagnostics::log_event(
+        "reconcile",
+        &format!(
+            "process done project={project_id} scanned={scanned} results={}",
+            results.len()
+        ),
+    );
     Ok(results)
 }
 

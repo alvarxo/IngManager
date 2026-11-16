@@ -13,7 +13,8 @@ use sqlx::SqlitePool;
 use tempfile::tempdir;
 
 use crate::auto_version::{
-    fingerprint_meta, reconcile_project_cancelable, FINGERPRINT_HEAD_MAX, FINGERPRINT_TAIL_MAX,
+    collect_version_pattern_paths, collect_version_pattern_paths_catch_unwind, fingerprint_meta,
+    reconcile_project_cancelable, FINGERPRINT_HEAD_MAX, FINGERPRINT_TAIL_MAX,
 };
 use crate::commands::projects::ensure_standard_categories_if_empty;
 use crate::db;
@@ -174,4 +175,55 @@ async fn open_seeds_categories_when_empty() {
         .await
         .unwrap();
     assert_eq!(again.0, after.0);
+}
+
+#[test]
+fn walk_terminates_on_symlink_loop_and_huge_sdb() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("EBR ing manager").join("1090");
+    let modelos = root.join("02_MODELOS");
+    fs::create_dir_all(&modelos).unwrap();
+
+    // Huge mock SDB with version pattern — must not hang/OOM the walk.
+    write_large_file(&modelos.join("CENTINELA_v01.sdb"), 16 * 1024 * 1024);
+
+    // Symlink loop (Linux stand-in for Windows junction loops).
+    #[cfg(unix)]
+    {
+        let a = root.join("loop_a");
+        let b = root.join("loop_b");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        let _ = std::os::unix::fs::symlink(&b, a.join("to_b"));
+        let _ = std::os::unix::fs::symlink(&a, b.join("to_a"));
+    }
+
+    let start = Instant::now();
+    let (paths, stats) = collect_version_pattern_paths(&root);
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed.as_secs() < 10,
+        "walk hung on loop/huge tree: {elapsed:?} stats={stats:?}"
+    );
+    assert!(
+        paths.iter().any(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().contains("CENTINELA_v01"))
+                .unwrap_or(false)
+        }),
+        "expected version-pattern sdb in walk results"
+    );
+
+    let catch = collect_version_pattern_paths_catch_unwind(root.clone());
+    assert!(catch.is_ok(), "catch_unwind wrapper must succeed");
+}
+
+#[tokio::test]
+async fn reconcile_on_open_setting_defaults_off() {
+    let dir = tempdir().unwrap();
+    let pool = pool_in(dir.path()).await;
+    let v = db::get_setting(&pool, "reconcile_on_open")
+        .await
+        .unwrap();
+    assert!(v.is_none(), "unset setting must mean open skips reconcile");
 }

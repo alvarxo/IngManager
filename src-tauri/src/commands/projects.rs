@@ -383,27 +383,51 @@ pub async fn open_project(state: State<'_, AppState>, id: String) -> AppResult<P
         );
     }
 
-    // Heavy reconcile must never block open (OOM/hang risk on large projects like 1090).
+    // Default OFF after 1090 hang: WalkDir on Windows junctions can stall forever
+    // before any progress log. Opt-in via Settings → reconcile_on_open=1.
+    let reconcile_on_open = crate::db::get_setting(&state.pool, "reconcile_on_open")
+        .await
+        .ok()
+        .flatten()
+        .map(|v| {
+            let t = v.trim().to_ascii_lowercase();
+            matches!(t.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false);
+
+    if !reconcile_on_open {
+        crate::diagnostics::log_event(
+            "open",
+            &format!(
+                "returned id={id} (reconcile skipped; enable Settings reconcile_on_open)"
+            ),
+        );
+        return Ok(project);
+    }
+
+    // Heavy reconcile must never block open; hard timeout + cancelable generation.
     let gen = state.begin_open_reconcile();
     let pool = state.pool.clone();
     let cancel = state.open_reconcile_cancel.clone();
     let gen_cell = state.open_reconcile_generation.clone();
     let project_id = id.clone();
     let folder_label = project.root_relative_path.clone();
+    let timeout_secs = crate::auto_version::RECONCILE_TIMEOUT_SECS;
     tokio::spawn(async move {
         crate::diagnostics::log_event(
             "reconcile",
-            &format!("start project={project_id} folder={folder_label} gen={gen}"),
+            &format!(
+                "start project={project_id} folder={folder_label} gen={gen} timeout_s={timeout_secs}"
+            ),
         );
-        match crate::auto_version::reconcile_project_cancelable(
+        let fut = crate::auto_version::reconcile_project_cancelable(
             &pool,
             &project_id,
             Some(cancel.as_ref()),
             Some((gen_cell.as_ref(), gen)),
-        )
-        .await
-        {
-            Ok(results) => {
+        );
+        match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), fut).await {
+            Ok(Ok(results)) => {
                 crate::diagnostics::log_event(
                     "reconcile",
                     &format!(
@@ -412,10 +436,19 @@ pub async fn open_project(state: State<'_, AppState>, id: String) -> AppResult<P
                     ),
                 );
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 crate::diagnostics::log_event(
                     "reconcile",
                     &format!("error project={project_id} gen={gen}: {e}"),
+                );
+            }
+            Err(_) => {
+                cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                crate::diagnostics::log_event(
+                    "reconcile",
+                    &format!(
+                        "timeout project={project_id} gen={gen} after {timeout_secs}s — cancelled"
+                    ),
                 );
             }
         }

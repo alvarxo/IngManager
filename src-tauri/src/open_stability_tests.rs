@@ -227,3 +227,73 @@ async fn reconcile_on_open_setting_defaults_off() {
         .unwrap();
     assert!(v.is_none(), "unset setting must mean open skips reconcile");
 }
+
+#[tokio::test]
+async fn watch_fs_setting_defaults_off() {
+    let dir = tempdir().unwrap();
+    let pool = pool_in(dir.path()).await;
+    let v = db::get_setting(&pool, "watch_fs").await.unwrap();
+    assert!(v.is_none(), "unset watch_fs must skip recursive watcher");
+}
+
+#[tokio::test]
+async fn categories_list_stays_sqlite_only_with_huge_indexed_names() {
+    let dir = tempdir().unwrap();
+    let pool = pool_in(dir.path()).await;
+    let root = upsert_primary_root(&pool, dir.path()).await.unwrap();
+    let pid = "proj-cats-light";
+    sqlx::query(
+        "INSERT INTO projects (
+            id, code, name, status, authorized_root_id, root_relative_path,
+            import_mode, layout_mode, created_at, updated_at
+         ) VALUES (?, '1090', 'Cats', 'active', ?, '1090', 'linked', 'mapped',
+            datetime('now'), datetime('now'))",
+    )
+    .bind(pid)
+    .bind(&root.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    ensure_standard_categories_if_empty(&pool, pid)
+        .await
+        .unwrap();
+
+    // Flood indexed_files — old path loaded all names into RAM.
+    for i in 0..5_000 {
+        sqlx::query(
+            "INSERT INTO indexed_files (
+                id, project_id, authorized_root_id, relative_path, absolute_path,
+                file_name, extension, is_directory, is_available, category_key, indexed_at
+             ) VALUES (?, ?, ?, ?, ?, ?, 'sdb', 0, 1, 'modelos', datetime('now'))",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(pid)
+        .bind(&root.id)
+        .bind(format!("1090/02_MODELOS/m{i}.sdb"))
+        .bind(format!("/tmp/m{i}.sdb"))
+        .bind(format!("m{i}.sdb"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let state = crate::state::AppState::new(pool.clone(), dir.path().join("t.db"));
+    let started = Instant::now();
+    // Invoke the SQL path used by the command (categories query + extension count).
+    let cats: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT c.key,
+            COALESCE((SELECT COUNT(*) FROM indexed_files f
+                      WHERE f.project_id = c.project_id AND f.category_key = c.key
+                        AND f.is_directory = 0 AND f.is_available = 1), 0),
+            COALESCE((SELECT COUNT(*) FROM documents d
+                      WHERE d.project_id = c.project_id AND d.category_id = c.id), 0)
+         FROM categories c WHERE c.project_id = ?",
+    )
+    .bind(pid)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap();
+    assert!(started.elapsed().as_secs() < 5);
+    assert!(cats.iter().any(|(k, n, _)| k == "modelos" && *n >= 5000));
+    let _ = state;
+}

@@ -29,6 +29,14 @@ export function SettingsView() {
     },
   });
 
+  const watchFs = useQuery({
+    queryKey: ["app-setting", "watch_fs"],
+    queryFn: async () => {
+      const v = await api.getAppSetting("watch_fs");
+      return v === "1" || v === "true";
+    },
+  });
+
   const setTreePolicy = useMutation({
     mutationFn: (policy: LogicalTreeExpandPolicy) =>
       api.setLogicalTreeExpandPolicy(policy),
@@ -48,6 +56,18 @@ export function SettingsView() {
       });
       setMsg(
         "Reconcile al abrir actualizado. Por defecto está desactivado (proyectos pesados como 1090).",
+      );
+    },
+    onError: (e: Error) => setMsg(String(e)),
+  });
+
+  const setWatchFs = useMutation({
+    mutationFn: (enabled: boolean) =>
+      api.setAppSetting("watch_fs", enabled ? "1" : "0"),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["app-setting", "watch_fs"] });
+      setMsg(
+        "Watcher FS actualizado. Por defecto off — reinicie la app tras activarlo.",
       );
     },
     onError: (e: Error) => setMsg(String(e)),
@@ -244,7 +264,7 @@ export function SettingsView() {
           junctions de Windows. Por defecto está desactivado; use «Reconciliar
           versiones» manual cuando lo necesite.
         </p>
-        <label className="flex items-center gap-2 text-[13px]">
+        <label className="mb-2 flex items-center gap-2 text-[13px]">
           <input
             type="checkbox"
             checked={reconcileOnOpen.data ?? false}
@@ -252,6 +272,15 @@ export function SettingsView() {
             onChange={(e) => setReconcileOnOpen.mutate(e.target.checked)}
           />
           Reconciliar versiones automáticamente al abrir
+        </label>
+        <label className="flex items-center gap-2 text-[13px]">
+          <input
+            type="checkbox"
+            checked={watchFs.data ?? false}
+            disabled={watchFs.isLoading || setWatchFs.isPending}
+            onChange={(e) => setWatchFs.mutate(e.target.checked)}
+          />
+          Vigilar cambios en disco (watcher recursivo)
         </label>
       </section>
 

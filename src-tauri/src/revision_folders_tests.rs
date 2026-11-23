@@ -353,5 +353,6 @@ async fn update_project_flag_column_defaults_off() {
         end_date: None,
         is_favorite: None,
         physical_revision_folders: Some(true),
+        rename_root_folder: None,
     };
 }

@@ -445,6 +445,7 @@ async fn test_f_metadata_no_path_rename() {
         end_date: None,
         is_favorite: None,
         physical_revision_folders: None,
+        rename_root_folder: None,
     };
     let _doc_input = UpdateDocumentInput {
         id: doc_id.clone(),

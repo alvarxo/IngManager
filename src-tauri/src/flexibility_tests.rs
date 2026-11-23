@@ -6,12 +6,16 @@ use sqlx::SqlitePool;
 use tempfile::tempdir;
 
 use crate::category_mapping::{map_folder_name_to_key, map_project_categories};
-use crate::commands::projects::{assert_code_unique, normalize_optional_code};
+use crate::commands::projects::{
+    assert_code_unique, normalize_optional_code, reprefix_business_code, rewrite_root_rel_path,
+    update_project_inner,
+};
 use crate::db;
 use crate::models::UpdateProjectInput;
 use crate::project_paths::{
     self, business_code_prefix, sanitize_folder_name, upsert_primary_root,
 };
+use crate::state::AppState;
 
 async fn pool_in(dir: &std::path::Path) -> SqlitePool {
     let db_path = dir.join("test.db");
@@ -281,6 +285,7 @@ async fn update_project_code_keeps_physical_path() {
         end_date: None,
         is_favorite: None,
         physical_revision_folders: None,
+        rename_root_folder: None,
     };
     let new_code = normalize_optional_code(input.code.as_deref())
         .unwrap()
@@ -363,4 +368,280 @@ async fn transmissions_use_physical_rel_not_code() {
     assert!(loc.absolute_path.ends_with("MyFolder"));
     assert_ne!(loc.root_relative_path, "2601");
     assert_eq!(loc.business_code_prefix, "2601");
+}
+
+#[test]
+fn reprefix_and_path_helpers() {
+    assert_eq!(
+        reprefix_business_code("1133_3-MC-001", "1133_3", "1133_2").as_deref(),
+        Some("1133_2-MC-001")
+    );
+    assert_eq!(
+        reprefix_business_code("1133_3-SAP-002", "1133_3", "1133_2").as_deref(),
+        Some("1133_2-SAP-002")
+    );
+    assert!(reprefix_business_code("OTHER-MC-001", "1133_3", "1133_2").is_none());
+    assert_eq!(
+        rewrite_root_rel_path("1133_3/01_MEMORIAS/a.docx", "1133_3", "1133_2").as_deref(),
+        Some("1133_2/01_MEMORIAS/a.docx")
+    );
+    assert_eq!(
+        rewrite_root_rel_path("1133_3", "1133_3", "1133_2").as_deref(),
+        Some("1133_2")
+    );
+    assert!(rewrite_root_rel_path("other/x", "1133_3", "1133_2").is_none());
+}
+
+#[tokio::test]
+async fn update_project_syncs_document_business_codes() {
+    let dir = tempdir().unwrap();
+    let pool = pool_in(dir.path()).await;
+    let root = upsert_primary_root(&pool, dir.path()).await.unwrap();
+    let folder = dir.path().join("1133_3");
+    fs::create_dir_all(&folder).unwrap();
+
+    sqlx::query(
+        "INSERT INTO projects (
+            id, code, name, status, authorized_root_id, root_relative_path,
+            import_mode, layout_mode, created_at, updated_at
+         ) VALUES ('p-sync', '1133_3', 'Andamios', 'active', ?, '1133_3',
+            'created', 'standard', datetime('now'), datetime('now'))",
+    )
+    .bind(&root.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO documents (
+            id, project_id, category_id, business_code, title, doc_type,
+            status, created_at, updated_at
+         ) VALUES
+           ('d1', 'p-sync', NULL, '1133_3-MC-001', 'Memoria 1', 'memory',
+            'desarrollo', datetime('now'), datetime('now')),
+           ('d2', 'p-sync', NULL, '1133_3-MC-002', 'Memoria 2', 'memory',
+            'desarrollo', datetime('now'), datetime('now')),
+           ('d3', 'p-sync', NULL, 'OTHER-MC-009', 'Alien', 'memory',
+            'desarrollo', datetime('now'), datetime('now'))",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO transmissions (
+            id, project_id, direction, code, status, created_at
+         ) VALUES ('t1', 'p-sync', 'sent', '1133_3-ENV-001', 'complete', datetime('now'))",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let state = AppState::new(pool.clone(), dir.path().join("test.db"));
+    let updated = update_project_inner(
+        &state,
+        UpdateProjectInput {
+            id: "p-sync".into(),
+            name: None,
+            description: None,
+            client_name: None,
+            code: Some("1133_2".into()),
+            status: None,
+            start_date: None,
+            end_date: None,
+            is_favorite: None,
+            physical_revision_folders: None,
+            rename_root_folder: Some(false),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(updated.code.as_deref(), Some("1133_2"));
+    assert_eq!(updated.root_relative_path, "1133_3");
+    assert!(folder.is_dir());
+
+    let codes: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT id, business_code FROM documents WHERE project_id = 'p-sync' ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(codes[0].1.as_deref(), Some("1133_2-MC-001"));
+    assert_eq!(codes[1].1.as_deref(), Some("1133_2-MC-002"));
+    assert_eq!(codes[2].1.as_deref(), Some("OTHER-MC-009"));
+
+    let tx_code: (Option<String>,) =
+        sqlx::query_as("SELECT code FROM transmissions WHERE id = 't1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(tx_code.0.as_deref(), Some("1133_2-ENV-001"));
+}
+
+#[tokio::test]
+async fn update_project_renames_root_folder_when_requested() {
+    let dir = tempdir().unwrap();
+    let pool = pool_in(dir.path()).await;
+    let root = upsert_primary_root(&pool, dir.path()).await.unwrap();
+    let old_folder = dir.path().join("1133_3");
+    fs::create_dir_all(old_folder.join("01_MEMORIAS")).unwrap();
+    fs::write(old_folder.join("01_MEMORIAS").join("a.docx"), b"x").unwrap();
+
+    sqlx::query(
+        "INSERT INTO projects (
+            id, code, name, status, authorized_root_id, root_relative_path,
+            import_mode, layout_mode, created_at, updated_at
+         ) VALUES ('p-ren', '1133_3', 'Andamios', 'active', ?, '1133_3',
+            'created', 'standard', datetime('now'), datetime('now'))",
+    )
+    .bind(&root.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO documents (
+            id, project_id, category_id, business_code, title, doc_type,
+            status, created_at, updated_at
+         ) VALUES ('d-ren', 'p-ren', NULL, '1133_3-MC-001', 'M1', 'memory',
+            'desarrollo', datetime('now'), datetime('now'))",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let ver_id = "v-ren";
+    sqlx::query(
+        "INSERT INTO document_versions (
+            id, document_id, version_number, label, created_at, is_snapshot
+         ) VALUES (?, 'd-ren', 1, 'v01', datetime('now'), 0)",
+    )
+    .bind(ver_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO document_files (
+            id, document_version_id, relative_path, file_name, extension,
+            size_bytes, is_available, created_at
+         ) VALUES ('f-ren', ?, '1133_3/01_MEMORIAS/a.docx', 'a.docx', 'docx',
+            1, 1, datetime('now'))",
+    )
+    .bind(ver_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "UPDATE document_versions SET source_relative_path = '1133_3/01_MEMORIAS/a.docx'
+         WHERE id = ?",
+    )
+    .bind(ver_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let state = AppState::new(pool.clone(), dir.path().join("test.db"));
+    let updated = update_project_inner(
+        &state,
+        UpdateProjectInput {
+            id: "p-ren".into(),
+            name: None,
+            description: None,
+            client_name: None,
+            code: Some("1133_2".into()),
+            status: None,
+            start_date: None,
+            end_date: None,
+            is_favorite: None,
+            physical_revision_folders: None,
+            rename_root_folder: Some(true),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(updated.code.as_deref(), Some("1133_2"));
+    assert_eq!(updated.root_relative_path, "1133_2");
+    assert!(!old_folder.exists());
+    assert!(dir.path().join("1133_2").join("01_MEMORIAS").join("a.docx").is_file());
+
+    let doc_code: (Option<String>,) =
+        sqlx::query_as("SELECT business_code FROM documents WHERE id = 'd-ren'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(doc_code.0.as_deref(), Some("1133_2-MC-001"));
+
+    let file_rel: (String,) =
+        sqlx::query_as("SELECT relative_path FROM document_files WHERE id = 'f-ren'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(file_rel.0, "1133_2/01_MEMORIAS/a.docx");
+
+    let src_rel: (Option<String>,) =
+        sqlx::query_as("SELECT source_relative_path FROM document_versions WHERE id = ?")
+            .bind(ver_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(src_rel.0.as_deref(), Some("1133_2/01_MEMORIAS/a.docx"));
+}
+
+#[tokio::test]
+async fn update_project_rename_conflicts_with_existing_folder() {
+    let dir = tempdir().unwrap();
+    let pool = pool_in(dir.path()).await;
+    let root = upsert_primary_root(&pool, dir.path()).await.unwrap();
+    fs::create_dir_all(dir.path().join("1133_3")).unwrap();
+    fs::create_dir_all(dir.path().join("1133_2")).unwrap(); // collision
+
+    sqlx::query(
+        "INSERT INTO projects (
+            id, code, name, status, authorized_root_id, root_relative_path,
+            import_mode, layout_mode, created_at, updated_at
+         ) VALUES ('p-col', '1133_3', 'X', 'active', ?, '1133_3',
+            'created', 'standard', datetime('now'), datetime('now'))",
+    )
+    .bind(&root.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let state = AppState::new(pool.clone(), dir.path().join("test.db"));
+    let err = update_project_inner(
+        &state,
+        UpdateProjectInput {
+            id: "p-col".into(),
+            name: None,
+            description: None,
+            client_name: None,
+            code: Some("1133_2".into()),
+            status: None,
+            start_date: None,
+            end_date: None,
+            is_favorite: None,
+            physical_revision_folders: None,
+            rename_root_folder: Some(true),
+        },
+    )
+    .await
+    .expect_err("folder collision");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("1133_2") || msg.contains("existe"),
+        "unexpected error: {msg}"
+    );
+
+    // Code and path unchanged after failed rename
+    let row: (Option<String>, String) =
+        sqlx::query_as("SELECT code, root_relative_path FROM projects WHERE id = 'p-col'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(row.0.as_deref(), Some("1133_3"));
+    assert_eq!(row.1, "1133_3");
+    assert!(dir.path().join("1133_3").is_dir());
 }

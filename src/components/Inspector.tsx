@@ -108,6 +108,8 @@ export function Inspector() {
   const [editName, setEditName] = useState("");
   const [editClient, setEditClient] = useState("");
   const [editDescription, setEditDescription] = useState("");
+  /** Opt-in: also rename physical root folder to the new code (default off). */
+  const [renameRootFolder, setRenameRootFolder] = useState(false);
   const [projectMetaError, setProjectMetaError] = useState<string | null>(null);
   const [reorgPreview, setReorgPreview] = useState<
     Awaited<ReturnType<typeof api.previewRevisionFolderReorg>> | null
@@ -115,22 +117,36 @@ export function Inspector() {
   const [reorgError, setReorgError] = useState<string | null>(null);
   const [reorgResult, setReorgResult] = useState<string | null>(null);
 
+  const trimmedEditCode = editCode.trim();
+  const canOfferFolderRename =
+    !!trimmedEditCode &&
+    !!project.data &&
+    trimmedEditCode !== project.data.root_relative_path;
+
   const projectMetaMutation = useMutation({
     mutationFn: () =>
       api.updateProject({
         id: projectId!,
-        // Always send code when saving metadata so empty clears it (logical only).
-        code: editCode.trim(),
+        // Always send code when saving metadata so empty clears it.
+        code: trimmedEditCode,
         name: editName.trim() || undefined,
         client_name: editClient.trim() || null,
         description: editDescription.trim() || null,
+        rename_root_folder: canOfferFolderRename && renameRootFolder ? true : false,
       }),
     onSuccess: async () => {
       setEditingProject(false);
+      setRenameRootFolder(false);
       setProjectMetaError(null);
       await qc.invalidateQueries({ queryKey: ["project", projectId] });
       await qc.invalidateQueries({ queryKey: ["projects"] });
       await qc.invalidateQueries({ queryKey: ["favorite-projects"] });
+      // Document / transmission codes may have been re-prefixed with the new project code.
+      await qc.invalidateQueries({ queryKey: ["documents"] });
+      await qc.invalidateQueries({ queryKey: ["document"] });
+      await qc.invalidateQueries({ queryKey: ["transmissions"] });
+      await qc.invalidateQueries({ queryKey: ["category-files"] });
+      await qc.invalidateQueries({ queryKey: ["logical-tree"] });
     },
     onError: (e: Error) => setProjectMetaError(String(e)),
   });
@@ -207,7 +223,8 @@ export function Inspector() {
                         value={project.data.description ?? "—"}
                       />
                       <p className="text-[11px] text-muted">
-                        La ruta física no cambia al editar metadatos.
+                        Al editar el código se sincronizan los códigos de documentos.
+                        La carpeta física solo se renombra si lo confirma al guardar.
                       </p>
                     </>
                   ) : (
@@ -250,12 +267,35 @@ export function Inspector() {
                         />
                       </label>
                       <Meta
-                        label="Ruta (solo lectura)"
-                        value={project.data.root_relative_path}
+                        label="Ruta"
+                        value={
+                          canOfferFolderRename && renameRootFolder
+                            ? trimmedEditCode
+                            : project.data.root_relative_path
+                        }
                         mono
                       />
+                      {canOfferFolderRename ? (
+                        <label className="flex items-start gap-2 text-[12px] text-text">
+                          <input
+                            type="checkbox"
+                            className="mt-0.5"
+                            checked={renameRootFolder}
+                            onChange={(e) => setRenameRootFolder(e.target.checked)}
+                          />
+                          <span>
+                            También renombrar carpeta raíz a{" "}
+                            <span className="font-mono text-accent">{trimmedEditCode}</span>
+                          </span>
+                        </label>
+                      ) : (
+                        <p className="text-[11px] text-muted">
+                          Sin marcar, el código es lógico y la carpeta física no se mueve.
+                        </p>
+                      )}
                       <p className="text-[11px] text-muted">
-                        El código es lógico: no renombra la carpeta física.
+                        Al cambiar el código se actualizan solos los códigos de documentos
+                        (prefijo del proyecto).
                       </p>
                       {projectMetaError && (
                         <div className="border border-error/40 bg-error/10 px-2 py-1.5 text-[12px] text-error">
@@ -273,7 +313,10 @@ export function Inspector() {
                         <Button
                           size="sm"
                           variant="secondary"
-                          onClick={() => setEditingProject(false)}
+                          onClick={() => {
+                            setEditingProject(false);
+                            setRenameRootFolder(false);
+                          }}
                         >
                           Cancelar
                         </Button>
@@ -290,6 +333,7 @@ export function Inspector() {
                           setEditName(project.data!.name);
                           setEditClient(project.data!.client_name ?? "");
                           setEditDescription(project.data!.description ?? "");
+                          setRenameRootFolder(false);
                           setProjectMetaError(null);
                           setEditingProject(true);
                         }}

@@ -6,13 +6,46 @@ use uuid::Uuid;
 use crate::category_mapping::map_project_categories;
 use crate::codes::{current_year_two_digits, next_project_code};
 use crate::error::{AppError, AppResult};
+use crate::fs_util::move_entry;
+use crate::index_sync;
 use crate::models::{
     CategorySummary, CreateProjectInput, Project, RemoveProjectResult, UpdateProjectInput,
     STANDARD_FOLDERS,
 };
-use crate::path_security::ensure_under_root;
-use crate::project_paths::{self, sanitize_folder_name, AuthorizedRoot};
+use crate::path_security::{ensure_under_root, join_under_root};
+use crate::project_paths::{self, business_code_prefix, sanitize_folder_name, AuthorizedRoot};
 use crate::state::AppState;
+
+/// Rewrite `OLD-…` → `NEW-…` for a business/transmission code. Returns None if no match.
+pub(crate) fn reprefix_business_code(
+    code: &str,
+    old_prefix: &str,
+    new_prefix: &str,
+) -> Option<String> {
+    if old_prefix.is_empty() || old_prefix == new_prefix {
+        return None;
+    }
+    let needle = format!("{old_prefix}-");
+    code.strip_prefix(&needle)
+        .map(|rest| format!("{new_prefix}-{rest}"))
+}
+
+/// Rewrite authorized-root-relative path when the project folder segment changes.
+pub(crate) fn rewrite_root_rel_path(
+    path: &str,
+    old_folder: &str,
+    new_folder: &str,
+) -> Option<String> {
+    if old_folder.is_empty() || old_folder == new_folder {
+        return None;
+    }
+    if path == old_folder {
+        return Some(new_folder.to_string());
+    }
+    let needle = format!("{old_folder}/");
+    path.strip_prefix(&needle)
+        .map(|rest| format!("{new_folder}/{rest}"))
+}
 
 async fn fetch_project(state: &AppState, id: &str) -> AppResult<Project> {
     sqlx::query_as::<_, Project>("SELECT * FROM projects WHERE id = ?")
@@ -269,7 +302,14 @@ pub async fn update_project(
     state: State<'_, AppState>,
     input: UpdateProjectInput,
 ) -> AppResult<Project> {
-    let existing = fetch_project(&state, &input.id).await?;
+    update_project_inner(&state, input).await
+}
+
+pub async fn update_project_inner(
+    state: &AppState,
+    input: UpdateProjectInput,
+) -> AppResult<Project> {
+    let existing = fetch_project(state, &input.id).await?;
 
     let name = input
         .name
@@ -286,7 +326,6 @@ pub async fn update_project(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     // `Some` replaces the logical code (empty → clear). Omitted/`None` keeps existing.
-    // Does not rename the physical folder (`root_relative_path` untouched).
     let code = if let Some(raw) = input.code.as_deref() {
         let normalized = normalize_optional_code(Some(raw))?;
         if let Some(ref c) = normalized {
@@ -299,13 +338,13 @@ pub async fn update_project(
     } else {
         existing.code.clone()
     };
-    let status = input.status.unwrap_or(existing.status);
+    let status = input.status.unwrap_or(existing.status.clone());
     let allowed = ["active", "archived", "cancelled", "completed"];
     if !allowed.contains(&status.as_str()) {
         return Err(AppError::msg("Estado de proyecto inválido"));
     }
-    let start_date = input.start_date.or(existing.start_date);
-    let end_date = input.end_date.or(existing.end_date);
+    let start_date = input.start_date.or(existing.start_date.clone());
+    let end_date = input.end_date.or(existing.end_date.clone());
     let is_favorite = input
         .is_favorite
         .map(|v| if v { 1 } else { 0 })
@@ -315,25 +354,176 @@ pub async fn update_project(
         .map(|v| if v { 1 } else { 0 })
         .unwrap_or(existing.physical_revision_folders);
 
-    sqlx::query(
-        "UPDATE projects SET
-            name = ?, description = ?, client_name = ?, code = ?, status = ?,
-            start_date = ?, end_date = ?, is_favorite = ?,
-            physical_revision_folders = ?, updated_at = datetime('now')
-         WHERE id = ?",
-    )
-    .bind(&name)
-    .bind(&description)
-    .bind(&client_name)
-    .bind(&code)
-    .bind(&status)
-    .bind(&start_date)
-    .bind(&end_date)
-    .bind(is_favorite)
-    .bind(physical_revision_folders)
-    .bind(&input.id)
-    .execute(&state.pool)
-    .await?;
+    let old_folder = existing.root_relative_path.clone();
+    let mut new_folder = old_folder.clone();
+    let rename_requested = input.rename_root_folder.unwrap_or(false);
+    let mut renamed_abs: Option<(PathBuf, PathBuf, PathBuf)> = None; // (root, old, new)
+
+    if rename_requested {
+        let Some(ref new_code) = code else {
+            return Err(AppError::msg(
+                "Para renombrar la carpeta raíz hace falta un código de proyecto",
+            ));
+        };
+        let folder = sanitize_folder_name(new_code)?;
+        if folder != old_folder {
+            let root = sqlx::query_as::<_, AuthorizedRoot>(
+                "SELECT id, absolute_path, label, is_primary, created_at
+                 FROM authorized_roots WHERE id = ?",
+            )
+            .bind(&existing.authorized_root_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .ok_or_else(|| AppError::msg("Raíz autorizada no encontrada"))?;
+
+            let root_path = PathBuf::from(&root.absolute_path);
+            if !root_path.is_dir() {
+                return Err(AppError::msg("La raíz autorizada no es accesible"));
+            }
+
+            let collision: Option<(String,)> = sqlx::query_as(
+                "SELECT id FROM projects
+                 WHERE authorized_root_id = ? AND root_relative_path = ? AND id != ?",
+            )
+            .bind(&existing.authorized_root_id)
+            .bind(&folder)
+            .bind(&input.id)
+            .fetch_optional(&state.pool)
+            .await?;
+            if collision.is_some() {
+                return Err(AppError::msg(format!(
+                    "Ya hay un proyecto registrado en la carpeta {folder}"
+                )));
+            }
+
+            let old_abs = join_under_root(&root_path, &old_folder)?;
+            let new_abs = ensure_under_root(&root_path, &root_path.join(&folder))?;
+            if !old_abs.exists() {
+                return Err(AppError::msg(format!(
+                    "No se encuentra la carpeta física «{old_folder}» bajo la raíz"
+                )));
+            }
+            if new_abs.exists() {
+                return Err(AppError::msg(format!(
+                    "Ya existe la carpeta física «{folder}» bajo la raíz"
+                )));
+            }
+
+            move_entry(&old_abs, &new_abs)?;
+            renamed_abs = Some((root_path, old_abs, new_abs));
+            new_folder = folder;
+        }
+    }
+
+    // Collect OLD prefixes to rewrite → new project code.
+    // Includes the prior logical prefix, and (when renaming) the old folder name so a
+    // later rename still fixes docs left stale after a code-only edit.
+    let sync_from_prefixes: Vec<String> = {
+        let mut out = Vec::new();
+        if let Some(ref new_prefix) = code {
+            let logical =
+                business_code_prefix(existing.code.as_deref(), &existing.root_relative_path);
+            if logical != *new_prefix {
+                out.push(logical);
+            }
+            if new_folder != old_folder
+                && old_folder != *new_prefix
+                && !out.iter().any(|p| p == &old_folder)
+            {
+                out.push(old_folder.clone());
+            }
+        }
+        out
+    };
+    let did_sync_codes = !sync_from_prefixes.is_empty();
+
+    let db_result = async {
+        let mut tx = state.pool.begin().await?;
+
+        sqlx::query(
+            "UPDATE projects SET
+                name = ?, description = ?, client_name = ?, code = ?, status = ?,
+                start_date = ?, end_date = ?, is_favorite = ?,
+                physical_revision_folders = ?, root_relative_path = ?,
+                updated_at = datetime('now')
+             WHERE id = ?",
+        )
+        .bind(&name)
+        .bind(&description)
+        .bind(&client_name)
+        .bind(&code)
+        .bind(&status)
+        .bind(&start_date)
+        .bind(&end_date)
+        .bind(is_favorite)
+        .bind(physical_revision_folders)
+        .bind(&new_folder)
+        .bind(&input.id)
+        .execute(&mut *tx)
+        .await?;
+
+        if let Some(ref new_prefix) = code {
+            for old_prefix in &sync_from_prefixes {
+                sync_document_and_transmission_codes(
+                    &mut tx,
+                    &input.id,
+                    old_prefix,
+                    new_prefix,
+                )
+                .await?;
+            }
+        }
+
+        if new_folder != old_folder {
+            rewrite_project_path_prefixes(&mut tx, &input.id, &old_folder, &new_folder).await?;
+        }
+
+        sqlx::query(
+            "INSERT INTO audit_log (id, entity_type, entity_id, action, detail, project_id)
+             VALUES (?, 'project', ?, 'update', ?, ?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&input.id)
+        .bind(format!(
+            "Updated project code={:?} rename_folder={} path={}->{}",
+            code,
+            rename_requested,
+            old_folder,
+            new_folder
+        ))
+        .bind(&input.id)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok::<(), AppError>(())
+    }
+    .await;
+
+    if let Err(e) = db_result {
+        if let Some((ref root_path, ref old_abs, ref new_abs)) = renamed_abs {
+            // Best-effort undo of the FS rename if DB failed.
+            let _ = move_entry(new_abs, old_abs);
+            let _ = root_path; // silence
+        }
+        return Err(e);
+    }
+
+    if let Some((ref root_path, _, ref new_abs)) = renamed_abs {
+        // Drop stale index rows for the old folder, then reindex the new tree.
+        sqlx::query(
+            "DELETE FROM indexed_files
+             WHERE authorized_root_id = ?
+               AND (relative_path = ? OR relative_path LIKE ?)",
+        )
+        .bind(&existing.authorized_root_id)
+        .bind(&old_folder)
+        .bind(format!("{old_folder}/%"))
+        .execute(&state.pool)
+        .await
+        .ok();
+        let _ = index_sync::refresh_subtree(&state.pool, root_path, new_abs).await;
+    }
 
     crate::search_index::upsert_fts(
         &state.pool,
@@ -348,13 +538,236 @@ pub async fn update_project(
     .await
     .ok();
 
-    fetch_project(&state, &input.id).await
+    if did_sync_codes {
+        refresh_project_code_fts(&state.pool, &input.id).await.ok();
+    }
+
+    fetch_project(state, &input.id).await
+}
+
+async fn sync_document_and_transmission_codes(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    project_id: &str,
+    old_prefix: &str,
+    new_prefix: &str,
+) -> AppResult<()> {
+    if old_prefix.is_empty() || old_prefix == new_prefix {
+        return Ok(());
+    }
+
+    // documents.business_code: OLD-… → NEW-…
+    sqlx::query(
+        "UPDATE documents
+         SET business_code = ? || substr(business_code, length(?) + 1),
+             updated_at = datetime('now')
+         WHERE project_id = ?
+           AND business_code IS NOT NULL
+           AND business_code LIKE ? || '-%'",
+    )
+    .bind(new_prefix)
+    .bind(old_prefix)
+    .bind(project_id)
+    .bind(old_prefix)
+    .execute(&mut **tx)
+    .await?;
+
+    // transmissions.code (ENV/REC) use the same project prefix
+    sqlx::query(
+        "UPDATE transmissions
+         SET code = ? || substr(code, length(?) + 1)
+         WHERE project_id = ?
+           AND code IS NOT NULL
+           AND code LIKE ? || '-%'",
+    )
+    .bind(new_prefix)
+    .bind(old_prefix)
+    .bind(project_id)
+    .bind(old_prefix)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+async fn rewrite_project_path_prefixes(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    project_id: &str,
+    old_folder: &str,
+    new_folder: &str,
+) -> AppResult<()> {
+    // document_files (via versions → documents)
+    sqlx::query(
+        "UPDATE document_files
+         SET relative_path = ? || substr(relative_path, length(?) + 1)
+         WHERE (relative_path = ? OR relative_path LIKE ? || '/%')
+           AND document_version_id IN (
+             SELECT dv.id FROM document_versions dv
+             JOIN documents d ON d.id = dv.document_id
+             WHERE d.project_id = ?
+           )",
+    )
+    .bind(new_folder)
+    .bind(old_folder)
+    .bind(old_folder)
+    .bind(old_folder)
+    .bind(project_id)
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        "UPDATE document_versions
+         SET source_relative_path = CASE
+               WHEN source_relative_path = ? OR source_relative_path LIKE ? || '/%'
+                 THEN ? || substr(source_relative_path, length(?) + 1)
+               ELSE source_relative_path
+             END,
+             snapshot_relative_path = CASE
+               WHEN snapshot_relative_path = ? OR snapshot_relative_path LIKE ? || '/%'
+                 THEN ? || substr(snapshot_relative_path, length(?) + 1)
+               ELSE snapshot_relative_path
+             END
+         WHERE document_id IN (SELECT id FROM documents WHERE project_id = ?)",
+    )
+    .bind(old_folder)
+    .bind(old_folder)
+    .bind(new_folder)
+    .bind(old_folder)
+    .bind(old_folder)
+    .bind(old_folder)
+    .bind(new_folder)
+    .bind(old_folder)
+    .bind(project_id)
+    .execute(&mut **tx)
+    .await?;
+
+    // Transmission path columns (authorized-root-relative)
+    for col in [
+        "folder_relative_path",
+        "zip_relative_path",
+        "original_import_relative_path",
+        "extracted_relative_path",
+        "antecedentes_relative_path",
+    ] {
+        let sql = format!(
+            "UPDATE transmissions
+             SET {col} = CASE
+               WHEN {col} = ? OR {col} LIKE ? || '/%'
+                 THEN ? || substr({col}, length(?) + 1)
+               ELSE {col}
+             END
+             WHERE project_id = ?"
+        );
+        sqlx::query(&sql)
+            .bind(old_folder)
+            .bind(old_folder)
+            .bind(new_folder)
+            .bind(old_folder)
+            .bind(project_id)
+            .execute(&mut **tx)
+            .await?;
+    }
+
+    sqlx::query(
+        "UPDATE transmission_items
+         SET relative_path = CASE
+               WHEN relative_path = ? OR relative_path LIKE ? || '/%'
+                 THEN ? || substr(relative_path, length(?) + 1)
+               ELSE relative_path
+             END,
+             snapshot_relative_path = CASE
+               WHEN snapshot_relative_path = ? OR snapshot_relative_path LIKE ? || '/%'
+                 THEN ? || substr(snapshot_relative_path, length(?) + 1)
+               ELSE snapshot_relative_path
+             END
+         WHERE transmission_id IN (SELECT id FROM transmissions WHERE project_id = ?)",
+    )
+    .bind(old_folder)
+    .bind(old_folder)
+    .bind(new_folder)
+    .bind(old_folder)
+    .bind(old_folder)
+    .bind(old_folder)
+    .bind(new_folder)
+    .bind(old_folder)
+    .bind(project_id)
+    .execute(&mut **tx)
+    .await?;
+
+    // Soft references — best effort (original_path may be abs or root-relative)
+    sqlx::query(
+        "UPDATE trash_items
+         SET original_path = CASE
+               WHEN original_path = ? OR original_path LIKE ? || '/%'
+                 THEN ? || substr(original_path, length(?) + 1)
+               ELSE original_path
+             END
+         WHERE project_id = ?",
+    )
+    .bind(old_folder)
+    .bind(old_folder)
+    .bind(new_folder)
+    .bind(old_folder)
+    .bind(project_id)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+async fn refresh_project_code_fts(pool: &sqlx::SqlitePool, project_id: &str) -> AppResult<()> {
+    let docs: Vec<(String, Option<String>, String, Option<String>, Option<String>)> =
+        sqlx::query_as(
+            "SELECT id, business_code, title, notes, origin FROM documents WHERE project_id = ?",
+        )
+        .bind(project_id)
+        .fetch_all(pool)
+        .await?;
+    for (id, code, title, notes, origin) in docs {
+        let body = [notes, origin]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" ");
+        crate::search_index::upsert_fts(
+            pool,
+            "document",
+            &id,
+            Some(project_id),
+            &title,
+            code.as_deref(),
+            if body.is_empty() { None } else { Some(&body) },
+            None,
+        )
+        .await?;
+    }
+
+    let txs: Vec<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT id, code, subject, counterpart FROM transmissions
+         WHERE project_id = ? AND status = 'complete'",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await?;
+    for (id, code, subject, counterpart) in txs {
+        crate::search_index::upsert_fts(
+            pool,
+            "transmission",
+            &id,
+            Some(project_id),
+            subject.as_deref().unwrap_or("transmisión"),
+            code.as_deref(),
+            counterpart.as_deref(),
+            None,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn archive_project(state: State<'_, AppState>, id: String) -> AppResult<Project> {
-    update_project(
-        state,
+    update_project_inner(
+        &state,
         UpdateProjectInput {
             id,
             name: None,
@@ -366,6 +779,7 @@ pub async fn archive_project(state: State<'_, AppState>, id: String) -> AppResul
             end_date: None,
             is_favorite: None,
             physical_revision_folders: None,
+            rename_root_folder: None,
         },
     )
     .await

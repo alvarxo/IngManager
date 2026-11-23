@@ -52,6 +52,11 @@ export interface UpdateProjectInput {
   end_date?: string | null;
   is_favorite?: boolean | null;
   physical_revision_folders?: boolean | null;
+  /**
+   * When true, also rename the physical root folder to the new code and rewrite
+   * stored relative paths. Default false (code-only, same as before).
+   */
+  rename_root_folder?: boolean | null;
 }
 
 export interface RevisionFolderMoveItem {

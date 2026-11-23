@@ -6,7 +6,9 @@ use sqlx::SqlitePool;
 use tempfile::tempdir;
 
 use crate::category_mapping::{map_folder_name_to_key, map_project_categories};
+use crate::commands::projects::{assert_code_unique, normalize_optional_code};
 use crate::db;
+use crate::models::UpdateProjectInput;
 use crate::project_paths::{
     self, business_code_prefix, sanitize_folder_name, upsert_primary_root,
 };
@@ -231,6 +233,100 @@ fn smart_category_mapping_aliases() {
 fn no_silent_path_helpers() {
     assert!(sanitize_folder_name("../x").is_err());
     assert_eq!(business_code_prefix(None, "A/B"), "B");
+}
+
+/// update_project can change logical `code` without touching `root_relative_path`.
+/// Uniqueness is global (UNIQUE on projects.code), not per authorized root.
+#[tokio::test]
+async fn update_project_code_keeps_physical_path() {
+    let dir = tempdir().unwrap();
+    let pool = pool_in(dir.path()).await;
+    let root = upsert_primary_root(&pool, dir.path()).await.unwrap();
+    let folder = dir.path().join("Physical_Name");
+    fs::create_dir_all(&folder).unwrap();
+
+    sqlx::query(
+        "INSERT INTO projects (
+            id, code, name, status, authorized_root_id, root_relative_path,
+            import_mode, layout_mode, created_at, updated_at
+         ) VALUES ('p-code', '1090', 'Proyecto', 'active', ?, 'Physical_Name',
+            'linked', 'mapped', datetime('now'), datetime('now'))",
+    )
+    .bind(&root.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Second project occupies another code (global uniqueness).
+    sqlx::query(
+        "INSERT INTO projects (
+            id, code, name, status, authorized_root_id, root_relative_path,
+            import_mode, layout_mode, created_at, updated_at
+         ) VALUES ('p-other', '2601', 'Otro', 'active', ?, 'Other',
+            'linked', 'mapped', datetime('now'), datetime('now'))",
+    )
+    .bind(&root.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let input = UpdateProjectInput {
+        id: "p-code".into(),
+        name: None,
+        description: None,
+        client_name: None,
+        code: Some("9999".into()),
+        status: None,
+        start_date: None,
+        end_date: None,
+        is_favorite: None,
+        physical_revision_folders: None,
+    };
+    let new_code = normalize_optional_code(input.code.as_deref())
+        .unwrap()
+        .expect("code set");
+    assert_code_unique(&pool, &new_code, Some(&input.id))
+        .await
+        .expect("9999 free");
+    assert!(assert_code_unique(&pool, "2601", Some(&input.id))
+        .await
+        .is_err());
+
+    // Same columns as update_project (code only; never root_relative_path).
+    sqlx::query(
+        "UPDATE projects SET code = ?, updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(&new_code)
+    .bind(&input.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let row: (Option<String>, String) =
+        sqlx::query_as("SELECT code, root_relative_path FROM projects WHERE id = 'p-code'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(row.0.as_deref(), Some("9999"));
+    assert_eq!(row.1, "Physical_Name");
+    assert!(folder.is_dir());
+
+    // Empty code clears logical code; path still untouched.
+    let cleared = normalize_optional_code(Some("  ")).unwrap();
+    assert!(cleared.is_none());
+    sqlx::query("UPDATE projects SET code = NULL WHERE id = 'p-code'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let row2: (Option<String>, String) =
+        sqlx::query_as("SELECT code, root_relative_path FROM projects WHERE id = 'p-code'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(row2.0.is_none());
+    assert_eq!(row2.1, "Physical_Name");
+
+    assert!(normalize_optional_code(Some("a/b")).is_err());
 }
 
 #[tokio::test]

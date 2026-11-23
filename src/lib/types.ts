@@ -45,6 +45,8 @@ export interface UpdateProjectInput {
   name?: string | null;
   description?: string | null;
   client_name?: string | null;
+  /** Logical business code (independent of UUID / physical path). Empty string clears. */
+  code?: string | null;
   status?: string | null;
   start_date?: string | null;
   end_date?: string | null;

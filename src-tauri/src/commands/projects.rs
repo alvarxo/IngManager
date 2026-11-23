@@ -275,16 +275,30 @@ pub async fn update_project(
         .name
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or(existing.name);
+        .unwrap_or(existing.name.clone());
     let description = input
         .description
-        .or(existing.description)
+        .or(existing.description.clone())
         .map(|s| s.trim().to_string());
     let client_name = input
         .client_name
-        .or(existing.client_name)
+        .or(existing.client_name.clone())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    // `Some` replaces the logical code (empty → clear). Omitted/`None` keeps existing.
+    // Does not rename the physical folder (`root_relative_path` untouched).
+    let code = if let Some(raw) = input.code.as_deref() {
+        let normalized = normalize_optional_code(Some(raw))?;
+        if let Some(ref c) = normalized {
+            if existing.code.as_deref() != Some(c.as_str()) {
+                // Global uniqueness (DB UNIQUE on projects.code), not per-root.
+                assert_code_unique(&state.pool, c, Some(&input.id)).await?;
+            }
+        }
+        normalized
+    } else {
+        existing.code.clone()
+    };
     let status = input.status.unwrap_or(existing.status);
     let allowed = ["active", "archived", "cancelled", "completed"];
     if !allowed.contains(&status.as_str()) {
@@ -303,7 +317,7 @@ pub async fn update_project(
 
     sqlx::query(
         "UPDATE projects SET
-            name = ?, description = ?, client_name = ?, status = ?,
+            name = ?, description = ?, client_name = ?, code = ?, status = ?,
             start_date = ?, end_date = ?, is_favorite = ?,
             physical_revision_folders = ?, updated_at = datetime('now')
          WHERE id = ?",
@@ -311,6 +325,7 @@ pub async fn update_project(
     .bind(&name)
     .bind(&description)
     .bind(&client_name)
+    .bind(&code)
     .bind(&status)
     .bind(&start_date)
     .bind(&end_date)
@@ -326,7 +341,7 @@ pub async fn update_project(
         &input.id,
         Some(&input.id),
         &name,
-        existing.code.as_deref(),
+        code.as_deref(),
         description.as_deref(),
         None,
     )
@@ -345,6 +360,7 @@ pub async fn archive_project(state: State<'_, AppState>, id: String) -> AppResul
             name: None,
             description: None,
             client_name: None,
+            code: None,
             status: Some("archived".into()),
             start_date: None,
             end_date: None,

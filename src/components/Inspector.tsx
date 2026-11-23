@@ -104,6 +104,7 @@ export function Inspector() {
   });
 
   const [editingProject, setEditingProject] = useState(false);
+  const [editCode, setEditCode] = useState("");
   const [editName, setEditName] = useState("");
   const [editClient, setEditClient] = useState("");
   const [editDescription, setEditDescription] = useState("");
@@ -118,6 +119,8 @@ export function Inspector() {
     mutationFn: () =>
       api.updateProject({
         id: projectId!,
+        // Always send code when saving metadata so empty clears it (logical only).
+        code: editCode.trim(),
         name: editName.trim() || undefined,
         client_name: editClient.trim() || null,
         description: editDescription.trim() || null,
@@ -127,6 +130,7 @@ export function Inspector() {
       setProjectMetaError(null);
       await qc.invalidateQueries({ queryKey: ["project", projectId] });
       await qc.invalidateQueries({ queryKey: ["projects"] });
+      await qc.invalidateQueries({ queryKey: ["favorite-projects"] });
     },
     onError: (e: Error) => setProjectMetaError(String(e)),
   });
@@ -175,16 +179,18 @@ export function Inspector() {
               {projectId && project.isLoading && (
                 <p className="text-muted">Cargando…</p>
               )}
-              {project.data && (
+                  {project.data && (
                 <div className="space-y-4">
                   <div>
-                    <div className="font-mono text-[15px] font-semibold text-accent">
-                      {project.data.code ?? "—"}
-                    </div>
                     {!editingProject ? (
-                      <div className="text-[15px] font-medium">
-                        {project.data.name}
-                      </div>
+                      <>
+                        <div className="font-mono text-[15px] font-semibold text-accent">
+                          {project.data.code ?? "—"}
+                        </div>
+                        <div className="text-[15px] font-medium">
+                          {project.data.name}
+                        </div>
+                      </>
                     ) : null}
                   </div>
                   {!editingProject ? (
@@ -206,6 +212,19 @@ export function Inspector() {
                     </>
                   ) : (
                     <div className="space-y-2">
+                      <label className="block">
+                        <div className="mb-1 text-[11px] uppercase text-muted">
+                          Código
+                        </div>
+                        <input
+                          className="h-[32px] w-full border border-border bg-elevated px-2 font-mono text-[13px]"
+                          value={editCode}
+                          onChange={(e) => setEditCode(e.target.value)}
+                          placeholder="Opcional"
+                          autoComplete="off"
+                          spellCheck={false}
+                        />
+                      </label>
                       <label className="block">
                         <div className="mb-1 text-[11px] uppercase text-muted">Nombre</div>
                         <input
@@ -235,6 +254,9 @@ export function Inspector() {
                         value={project.data.root_relative_path}
                         mono
                       />
+                      <p className="text-[11px] text-muted">
+                        El código es lógico: no renombra la carpeta física.
+                      </p>
                       {projectMetaError && (
                         <div className="border border-error/40 bg-error/10 px-2 py-1.5 text-[12px] text-error">
                           {projectMetaError}
@@ -264,6 +286,7 @@ export function Inspector() {
                         variant="secondary"
                         size="sm"
                         onClick={() => {
+                          setEditCode(project.data!.code ?? "");
                           setEditName(project.data!.name);
                           setEditClient(project.data!.client_name ?? "");
                           setEditDescription(project.data!.description ?? "");

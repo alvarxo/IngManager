@@ -439,6 +439,7 @@ async fn test_f_metadata_no_path_rename() {
         name: Some("Renamed Project".into()),
         description: Some("new desc".into()),
         client_name: None,
+        code: Some("9999".into()),
         status: None,
         start_date: None,
         end_date: None,

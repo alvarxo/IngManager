@@ -347,6 +347,7 @@ async fn update_project_flag_column_defaults_off() {
         name: None,
         description: None,
         client_name: None,
+        code: None,
         status: None,
         start_date: None,
         end_date: None,

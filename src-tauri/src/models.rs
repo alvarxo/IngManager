@@ -48,6 +48,9 @@ pub struct UpdateProjectInput {
     pub name: Option<String>,
     pub description: Option<String>,
     pub client_name: Option<String>,
+    /// Optional business code. When `Some`, replaces the logical code (empty → clear).
+    /// Independent of UUID and of `root_relative_path` (physical folder is never renamed).
+    pub code: Option<String>,
     pub status: Option<String>,
     pub start_date: Option<String>,
     pub end_date: Option<String>,

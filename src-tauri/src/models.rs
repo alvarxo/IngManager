@@ -49,7 +49,7 @@ pub struct UpdateProjectInput {
     pub description: Option<String>,
     pub client_name: Option<String>,
     /// Optional business code. When `Some`, replaces the logical code (empty → clear).
-    /// Independent of UUID and of `root_relative_path` (physical folder is never renamed).
+    /// Independent of UUID unless `rename_root_folder` is set.
     pub code: Option<String>,
     pub status: Option<String>,
     pub start_date: Option<String>,
@@ -57,6 +57,10 @@ pub struct UpdateProjectInput {
     pub is_favorite: Option<bool>,
     /// Opt-in: physical folders by revision (`RA`/`R0`) for memorias/planos.
     pub physical_revision_folders: Option<bool>,
+    /// When true and `code` resolves to a non-empty value different from the current
+    /// folder name, rename the physical project root under the authorized root and
+    /// rewrite stored relative paths. Default / omitted = false (code-only change).
+    pub rename_root_folder: Option<bool>,
 }
 
 /// Result of removing a project registration (SQLite only; files kept).

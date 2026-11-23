@@ -11,14 +11,27 @@ function normalizeOptionalCode(raw: string | null | undefined): string | null {
   return trimmed;
 }
 
+/** Mirror of Rust reprefix_business_code. */
+function reprefixBusinessCode(
+  code: string,
+  oldPrefix: string,
+  newPrefix: string,
+): string | null {
+  if (!oldPrefix || oldPrefix === newPrefix) return null;
+  const needle = `${oldPrefix}-`;
+  if (!code.startsWith(needle)) return null;
+  return `${newPrefix}-${code.slice(needle.length)}`;
+}
+
 describe("update project code (metadata)", () => {
-  it("UpdateProjectInput accepts code without path fields", () => {
+  it("UpdateProjectInput accepts code without forcing rename", () => {
     const input: UpdateProjectInput = {
       id: "p1",
       code: "9999",
       name: "Renamed",
+      rename_root_folder: false,
     };
-    expect(input).not.toHaveProperty("root_relative_path");
+    expect(input.rename_root_folder).toBe(false);
     expect(input.code).toBe("9999");
   });
 
@@ -37,15 +50,28 @@ describe("update project code (metadata)", () => {
     expect(normalizeOptionalCode("PRJ-ALPHA")).toBe("PRJ-ALPHA");
   });
 
-  it("metadata save payload always includes code when editing", () => {
-    const editCode = "  2601 ";
+  it("metadata save payload can opt into folder rename", () => {
+    const editCode = "  1133_2 ";
     const payload: UpdateProjectInput = {
       id: "p1",
       code: editCode.trim(),
       name: "Proyecto",
       client_name: null,
       description: null,
+      rename_root_folder: true,
     };
-    expect(payload.code).toBe("2601");
+    expect(payload.code).toBe("1133_2");
+    expect(payload.rename_root_folder).toBe(true);
+  });
+
+  it("reprefixes document business codes when project code changes", () => {
+    expect(reprefixBusinessCode("1133_3-MC-001", "1133_3", "1133_2")).toBe(
+      "1133_2-MC-001",
+    );
+    expect(reprefixBusinessCode("1133_3-SAP-002", "1133_3", "1133_2")).toBe(
+      "1133_2-SAP-002",
+    );
+    expect(reprefixBusinessCode("OTHER-MC-001", "1133_3", "1133_2")).toBeNull();
+    expect(reprefixBusinessCode("1133_3-MC-001", "1133_3", "1133_3")).toBeNull();
   });
 });

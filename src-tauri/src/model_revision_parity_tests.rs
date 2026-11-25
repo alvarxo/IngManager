@@ -459,5 +459,243 @@ async fn auto_pick_single_project_model_when_spawning() {
     .await
     .unwrap();
     assert_eq!(rev.spawned_model_document_ids.len(), 1);
+    assert!(rev.model_spawn_warnings.is_empty());
     assert!(modelos.join("ONLY_RA_v01.sdb").is_file());
+}
+
+/// Emit without model opt-in: document revision only, no warnings.
+#[tokio::test]
+async fn emit_memory_revision_without_models_ok() {
+    let dir = tempdir().unwrap();
+    let pool = db::init_pool(&dir.path().join("t.db")).await.unwrap();
+    let root = dir.path().join("root");
+    let mem = root.join("1126/04_MEMORIAS");
+    fs::create_dir_all(&mem).unwrap();
+    let root_id = setup_root(&pool, &root).await;
+    let pid = seed_project(&pool, &root_id, Some("1126"), "1126").await;
+    let state = AppState::new(pool.clone(), dir.path().join("t.db"));
+
+    let memo = mem.join("1126-MC-020.docx");
+    fs::write(&memo, b"memo").unwrap();
+    let memo_id = apply_incorporation(
+        &pool,
+        IncorporationApplyInput {
+            project_id: pid,
+            category_key: "memorias".into(),
+            absolute_paths: vec![memo.display().to_string()],
+            dest_absolute_path: None,
+            physical_op: Some(PhysicalOp::None),
+            decisions: vec![IncorporationGroupDecision {
+                group_key: "mc20".into(),
+                mode: IncorporationMode::RegisterNew,
+                document_id: None,
+                title: Some("MC 20".into()),
+                assign_code: Some(true),
+            }],
+        },
+    )
+    .await
+    .unwrap()
+    .groups[0]
+    .document_id
+    .clone()
+    .unwrap();
+
+    let rev = create_revision_inner(
+        &state,
+        CreateRevisionInput {
+            document_id: memo_id.clone(),
+            revision_code: "B".into(),
+            issued_at: None,
+            notes: None,
+            document_version_id: None,
+            file_paths: None,
+            format_labels: None,
+            freeze_linked: Some(true),
+            also_create_model_revision: Some(false),
+            source_model_document_ids: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_ne!(rev.document_id, memo_id);
+    assert_eq!(rev.revision_code, "B");
+    assert!(rev.spawned_model_document_ids.is_empty());
+    assert!(rev.model_spawn_warnings.is_empty());
+    assert!(mem.join("1126-MC-020_RB_v01.docx").is_file());
+}
+
+/// Opt-in model spawn with missing .sdb: document revision still created + soft warning.
+#[tokio::test]
+async fn emit_with_model_spawn_fail_still_creates_doc_revision() {
+    let dir = tempdir().unwrap();
+    let pool = db::init_pool(&dir.path().join("t.db")).await.unwrap();
+    let root = dir.path().join("root");
+    let mem = root.join("1126/04_MEMORIAS");
+    let modelos = root.join("1126/02_MODELOS");
+    fs::create_dir_all(&mem).unwrap();
+    fs::create_dir_all(&modelos).unwrap();
+    let root_id = setup_root(&pool, &root).await;
+    let pid = seed_project(&pool, &root_id, Some("1126"), "1126").await;
+    let state = AppState::new(pool.clone(), dir.path().join("t.db"));
+
+    let memo = mem.join("1126-MC-030.docx");
+    fs::write(&memo, b"memo").unwrap();
+    let sdb = modelos.join("1126-SAP-030.sdb");
+    fs::write(&sdb, b"sdb").unwrap();
+
+    let memo_id = apply_incorporation(
+        &pool,
+        IncorporationApplyInput {
+            project_id: pid.clone(),
+            category_key: "memorias".into(),
+            absolute_paths: vec![memo.display().to_string()],
+            dest_absolute_path: None,
+            physical_op: Some(PhysicalOp::None),
+            decisions: vec![IncorporationGroupDecision {
+                group_key: "mc30".into(),
+                mode: IncorporationMode::RegisterNew,
+                document_id: None,
+                title: Some("MC 30".into()),
+                assign_code: Some(true),
+            }],
+        },
+    )
+    .await
+    .unwrap()
+    .groups[0]
+    .document_id
+    .clone()
+    .unwrap();
+
+    let model_id = apply_incorporation(
+        &pool,
+        IncorporationApplyInput {
+            project_id: pid,
+            category_key: "modelos".into(),
+            absolute_paths: vec![sdb.display().to_string()],
+            dest_absolute_path: None,
+            physical_op: Some(PhysicalOp::None),
+            decisions: vec![IncorporationGroupDecision {
+                group_key: "sap30".into(),
+                mode: IncorporationMode::RegisterNew,
+                document_id: None,
+                title: Some("SAP 30".into()),
+                assign_code: Some(true),
+            }],
+        },
+    )
+    .await
+    .unwrap()
+    .groups[0]
+    .document_id
+    .clone()
+    .unwrap();
+
+    sqlx::query(
+        "UPDATE document_files SET file_role = 'principal' WHERE file_name LIKE '%.sdb'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Break FS so spawn fails after resolution.
+    fs::remove_file(&sdb).unwrap();
+
+    let rev = create_revision_inner(
+        &state,
+        CreateRevisionInput {
+            document_id: memo_id.clone(),
+            revision_code: "C".into(),
+            issued_at: None,
+            notes: None,
+            document_version_id: None,
+            file_paths: None,
+            format_labels: None,
+            freeze_linked: Some(true),
+            also_create_model_revision: Some(true),
+            source_model_document_ids: Some(vec![model_id]),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_ne!(rev.document_id, memo_id, "doc revision must still be created");
+    assert_eq!(rev.revision_code, "C");
+    assert!(rev.spawned_model_document_ids.is_empty());
+    assert!(
+        !rev.model_spawn_warnings.is_empty(),
+        "spawn failure should be a soft warning"
+    );
+    assert!(mem.join("1126-MC-030_RC_v01.docx").is_file());
+
+    let exists: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM documents WHERE id = ?")
+        .bind(&rev.document_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(exists.0, 1);
+}
+
+/// Opt-in with no resolvable model (empty project): still emits document + warning.
+#[tokio::test]
+async fn emit_with_unresolved_models_still_creates_doc_revision() {
+    let dir = tempdir().unwrap();
+    let pool = db::init_pool(&dir.path().join("t.db")).await.unwrap();
+    let root = dir.path().join("root");
+    let mem = root.join("1126/04_MEMORIAS");
+    fs::create_dir_all(&mem).unwrap();
+    let root_id = setup_root(&pool, &root).await;
+    let pid = seed_project(&pool, &root_id, Some("1126"), "1126").await;
+    let state = AppState::new(pool.clone(), dir.path().join("t.db"));
+
+    let memo = mem.join("1126-MC-040.docx");
+    fs::write(&memo, b"memo").unwrap();
+    let memo_id = apply_incorporation(
+        &pool,
+        IncorporationApplyInput {
+            project_id: pid,
+            category_key: "memorias".into(),
+            absolute_paths: vec![memo.display().to_string()],
+            dest_absolute_path: None,
+            physical_op: Some(PhysicalOp::None),
+            decisions: vec![IncorporationGroupDecision {
+                group_key: "mc40".into(),
+                mode: IncorporationMode::RegisterNew,
+                document_id: None,
+                title: Some("MC 40".into()),
+                assign_code: Some(true),
+            }],
+        },
+    )
+    .await
+    .unwrap()
+    .groups[0]
+    .document_id
+    .clone()
+    .unwrap();
+
+    let rev = create_revision_inner(
+        &state,
+        CreateRevisionInput {
+            document_id: memo_id.clone(),
+            revision_code: "1".into(),
+            issued_at: Some("2026-11-25".into()),
+            notes: None,
+            document_version_id: None,
+            file_paths: None,
+            format_labels: None,
+            freeze_linked: Some(true),
+            also_create_model_revision: Some(true),
+            source_model_document_ids: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_ne!(rev.document_id, memo_id);
+    assert!(rev.spawned_model_document_ids.is_empty());
+    assert_eq!(rev.model_spawn_warnings.len(), 1);
+    assert!(mem.join("1126-MC-040_R1_v01.docx").is_file());
 }

@@ -4,6 +4,10 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { Star } from "lucide-react";
 import { api } from "@/lib/api";
 import { modelTypeLabel, modelTypePrefix } from "@/lib/model-types";
+import {
+  formatRevisionEmitMessage,
+  planModelSpawn,
+} from "@/lib/revision-emit";
 import { formatBytes } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui-store";
 import { Button } from "./ui/button";
@@ -823,13 +827,14 @@ export function DocumentInspector() {
                       );
                       if (!code) return;
 
+                      // Cancel / No on this confirm = emit document only (never block on models).
                       let alsoModel = false;
                       let sourceModelIds: string[] | null = null;
                       if (isPlanosOrMemorias) {
-                        alsoModel = window.confirm(
-                          "¿También crear modelo de esta revisión?\n(_R{código}_v01.sdb alineado)\nCancelar = solo documento.",
+                        const userWantsModel = window.confirm(
+                          "¿También crear modelo de esta revisión?\n(_R{código}_v01.sdb alineado)\nCancelar = solo documento (siempre avanza).",
                         );
-                        if (alsoModel) {
+                        if (userWantsModel) {
                           try {
                             const models = await api.listDocuments(
                               d.project_id,
@@ -859,14 +864,8 @@ export function DocumentInspector() {
                               linkedIds.size > 0
                                 ? models.filter((m) => linkedIds.has(m.id))
                                 : models;
-                            if (candidates.length === 0) {
-                              window.alert(
-                                "No hay modelos en el proyecto. Se emitirá solo el documento.",
-                              );
-                              alsoModel = false;
-                            } else if (candidates.length === 1) {
-                              sourceModelIds = [candidates[0].id];
-                            } else {
+                            let pickedIndex1Based: number | null | undefined;
+                            if (candidates.length > 1) {
                               const lines = candidates
                                 .map(
                                   (m, i) =>
@@ -874,21 +873,31 @@ export function DocumentInspector() {
                                 )
                                 .join("\n");
                               const pick = window.prompt(
-                                `Varios modelos — indique el número (1–${candidates.length}):\n${lines}`,
+                                `Varios modelos — indique el número (1–${candidates.length}).\nCancelar = solo documento.\n${lines}`,
                               );
-                              const idx = pick ? Number.parseInt(pick, 10) - 1 : -1;
-                              if (idx < 0 || idx >= candidates.length) {
-                                window.alert(
-                                  "Selección inválida. Se emitirá solo el documento.",
-                                );
-                                alsoModel = false;
-                              } else {
-                                sourceModelIds = [candidates[idx].id];
-                              }
+                              pickedIndex1Based = pick
+                                ? Number.parseInt(pick, 10)
+                                : null;
+                            }
+                            const plan = planModelSpawn({
+                              userWantsModel: true,
+                              documentId,
+                              models,
+                              related,
+                              pickedIndex1Based,
+                            });
+                            alsoModel = plan.alsoCreateModel;
+                            sourceModelIds = plan.sourceModelIds;
+                            if (plan.notice) {
+                              window.alert(plan.notice);
                             }
                           } catch (e) {
-                            window.alert(String(e));
-                            return;
+                            // Listing/picker failure must not abort the document revision.
+                            alsoModel = false;
+                            sourceModelIds = null;
+                            window.alert(
+                              `No se pudieron cargar modelos (${String(e)}). Se emitirá solo el documento.`,
+                            );
                           }
                         }
                       }
@@ -896,18 +905,25 @@ export function DocumentInspector() {
                       let paths: string[] = [];
                       if (!isModelos) {
                         const addMore = window.confirm(
-                          "¿Agregar archivos extra además de congelar los vinculados?\nCancelar = solo congelar vinculados.",
+                          "¿Agregar archivos extra además de congelar los vinculados?\nCancelar = solo congelar vinculados (la revisión se emite igual).",
                         );
                         if (addMore) {
-                          const picked = await open({
-                            multiple: true,
-                            title: "Formatos adicionales (PDF, DOCX, …)",
-                          });
-                          paths = !picked
-                            ? []
-                            : Array.isArray(picked)
-                              ? picked
-                              : [picked];
+                          try {
+                            const picked = await open({
+                              multiple: true,
+                              title: "Formatos adicionales (PDF, DOCX, …)",
+                            });
+                            paths = !picked
+                              ? []
+                              : Array.isArray(picked)
+                                ? picked
+                                : [picked];
+                          } catch (e) {
+                            window.alert(
+                              `No se pudieron elegir archivos extra (${String(e)}). Se continúa congelando vinculados.`,
+                            );
+                            paths = [];
+                          }
                         }
                       }
                       try {
@@ -929,10 +945,9 @@ export function DocumentInspector() {
                         await qc.invalidateQueries({
                           queryKey: ["doc-related"],
                         });
-                        if (rev.spawned_model_document_ids?.length) {
-                          window.alert(
-                            `Revisión emitida. Modelo(s) creado(s): ${rev.spawned_model_document_ids.length}.`,
-                          );
+                        const msg = formatRevisionEmitMessage(rev);
+                        if (msg) {
+                          window.alert(msg);
                         }
                         setSelectedDocumentId(rev.document_id);
                         await qc.invalidateQueries({

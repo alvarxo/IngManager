@@ -35,7 +35,11 @@ pub struct SpawnedModelRevision {
 /// 1. Explicit `source_model_document_ids` (must be modelos in the same project).
 /// 2. Existing `modelo_de` / `relacionado` links to modelos.
 /// 3. Auto if the project has exactly one modelo document.
-/// 4. Otherwise error (UI must select) when `require_resolution` is true.
+/// 4. Otherwise empty when `require_resolution` is false (caller soft-warns),
+///    or error when `require_resolution` is true.
+///
+/// Callers that must never block document revision emit should pass
+/// `require_resolution = false` and treat empty/Err as soft warnings.
 pub async fn resolve_source_model_ids(
     state: &AppState,
     memory_doc: &DocumentRow,

@@ -533,6 +533,8 @@ export interface CreateRevisionInput {
 
 export interface CreateRevisionResult extends RevisionRow {
   spawned_model_document_ids: string[];
+  /** Soft failures when model spawn was requested; document revision still created. */
+  model_spawn_warnings?: string[];
 }
 
 export interface AttachFileInput {

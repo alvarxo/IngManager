@@ -191,10 +191,14 @@ pub struct CreateRevisionResult {
     pub status: Option<String>,
     /// Model documents created alongside this memoria/plano revision (opt-in).
     pub spawned_model_document_ids: Vec<String>,
+    /// Soft failures when opt-in model spawn was requested but could not complete.
+    /// The document revision itself was still created successfully.
+    #[serde(default)]
+    pub model_spawn_warnings: Vec<String>,
 }
 
 impl CreateRevisionResult {
-    fn from_row(row: RevisionRow, spawned: Vec<String>) -> Self {
+    fn from_row(row: RevisionRow, spawned: Vec<String>, warnings: Vec<String>) -> Self {
         Self {
             id: row.id,
             document_id: row.document_id,
@@ -205,6 +209,7 @@ impl CreateRevisionResult {
             document_version_id: row.document_version_id,
             status: row.status,
             spawned_model_document_ids: spawned,
+            model_spawn_warnings: warnings,
         }
     }
 }
@@ -2328,15 +2333,33 @@ pub async fn create_revision_inner(
     let is_model = cat_key == "modelos";
     let also_model = input.also_create_model_revision.unwrap_or(false) && !is_model;
 
-    // Resolve model sources early so we fail before creating the doc revision.
+    // Soft-resolve model sources: never block the document revision on models.
+    // Ambiguous / missing / invalid sources become warnings after the doc is created.
+    let mut model_spawn_warnings: Vec<String> = Vec::new();
     let spawn_model_ids = if also_model {
-        crate::model_revisions::resolve_source_model_ids(
+        match crate::model_revisions::resolve_source_model_ids(
             state,
             &source_doc,
             input.source_model_document_ids.as_deref(),
-            true,
+            false,
         )
-        .await?
+        .await
+        {
+            Ok(ids) if !ids.is_empty() => ids,
+            Ok(_) => {
+                model_spawn_warnings.push(
+                    "No se pudo determinar un modelo origen (ninguno, varios ambiguos o sin vínculo); se emitió solo el documento."
+                        .into(),
+                );
+                Vec::new()
+            }
+            Err(e) => {
+                model_spawn_warnings.push(format!(
+                    "No se pudo resolver modelos origen; se emitió solo el documento: {e}"
+                ));
+                Vec::new()
+            }
+        }
     } else {
         Vec::new()
     };
@@ -2568,6 +2591,7 @@ pub async fn create_revision_inner(
     }
 
     // Opt-in: spawn aligned model revision(s) with the same `_R` + `_v01`.
+    // Soft-fail: document revision already exists; never abort it for model errors.
     let mut spawned_model_document_ids = Vec::new();
     for model_id in &spawn_model_ids {
         match crate::model_revisions::spawn_model_revision(
@@ -2582,10 +2606,9 @@ pub async fn create_revision_inner(
         {
             Ok(spawned) => spawned_model_document_ids.push(spawned.document_id),
             Err(e) => {
-                // Doc revision already committed; surface partial failure clearly.
-                return Err(AppError::msg(format!(
-                    "Revisión de documento creada ({new_doc_id}), pero falló el modelo desde {model_id}: {e}"
-                )));
+                model_spawn_warnings.push(format!(
+                    "Revisión de documento creada, pero falló el modelo desde {model_id}: {e}"
+                ));
             }
         }
     }
@@ -2597,9 +2620,10 @@ pub async fn create_revision_inner(
         Some(&new_doc_id),
         "create_revision_document",
         Some(&format!(
-            "Revisión {code} desde {}; modelos={}",
+            "Revisión {code} desde {}; modelos={}; warnings={}",
             input.document_id,
-            spawned_model_document_ids.len()
+            spawned_model_document_ids.len(),
+            model_spawn_warnings.len()
         )),
     )
     .await
@@ -2618,6 +2642,7 @@ pub async fn create_revision_inner(
     Ok(CreateRevisionResult::from_row(
         row,
         spawned_model_document_ids,
+        model_spawn_warnings,
     ))
 }
 
